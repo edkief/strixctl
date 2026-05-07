@@ -16,14 +16,89 @@ pub fn apply_ppt(ppt: &PptLimits) -> Result<(), String> {
     ])
 }
 
-pub fn apply_fan_curve(curve: &FanCurve) -> Result<(), String> {
+/// Speed values in FanCurve are stored as percentages (0.0–100.0) mapped from
+/// asusctl's PWM range (0–255). We write them back as raw PWM (no '%') to
+/// avoid precision loss and to satisfy asusctl's strict 8-point requirement.
+pub fn apply_fan_curve(profile: &Profile, curve: &FanCurve) -> Result<(), String> {
     let points_str = curve
         .points
         .iter()
-        .map(|(t, s)| format!("{}c:{}%", *t as u8, *s as u8))
+        .map(|(t, s)| format!("{}c:{}", *t as u8, (*s / 100.0 * 255.0).round() as u8))
         .collect::<Vec<_>>()
         .join(",");
-    run_cmd("asusctl", &["fan-curve", "-f", &points_str])
+    let profile_str = profile.as_str();
+    for fan in ["cpu", "gpu"] {
+        run_cmd("asusctl", &[
+            "fan-curve",
+            "--mod-profile", profile_str,
+            "--fan", fan,
+            "--data", &points_str,
+        ])?;
+    }
+    run_cmd("asusctl", &[
+        "fan-curve",
+        "--mod-profile", profile_str,
+        "--enable-fan-curves", "true",
+    ])
+}
+
+/// Reads the CPU fan curve for `profile` from asusctl.
+pub fn read_fan_curve(profile: &Profile) -> Option<FanCurve> {
+    let out = Command::new("asusctl")
+        .args(["fan-curve", "--mod-profile", profile.as_str()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_cpu_fan_curve(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parses `asusctl fan-curve --mod-profile` output, e.g.:
+///   (fan: CPU, pwm: (1, 15, 30, ...), temp: (53, 54, 59, ...), enabled: true)
+/// PWM values (0–255) are normalised to percentages for the FanCurve.
+fn parse_cpu_fan_curve(output: &str) -> Option<FanCurve> {
+    let lines: Vec<&str> = output.lines().collect();
+    let cpu_idx = lines.iter().position(|l| {
+        let t = l.trim().to_lowercase();
+        t.starts_with("fan:") && t.contains("cpu")
+    })?;
+
+    let window_end = (cpu_idx + 8).min(lines.len());
+    let mut temps: Option<Vec<u32>> = None;
+    let mut pwms: Option<Vec<u32>> = None;
+
+    for line in &lines[cpu_idx..window_end] {
+        let t = line.trim();
+        let lower = t.to_lowercase();
+        if lower.starts_with("temp:") {
+            temps = extract_paren_u32s(t);
+        } else if lower.starts_with("pwm:") {
+            pwms = extract_paren_u32s(t);
+        }
+    }
+
+    let temps = temps?;
+    let pwms = pwms?;
+    if temps.len() != pwms.len() || temps.is_empty() {
+        return None;
+    }
+
+    let points = temps.iter().zip(pwms.iter())
+        .map(|(&t, &p)| (t as f32, p as f32 / 255.0 * 100.0))
+        .collect();
+    Some(FanCurve { points, hysteresis: 2 })
+}
+
+/// Extracts `u32` values from a `(a, b, c, ...)` tuple on a single line.
+fn extract_paren_u32s(s: &str) -> Option<Vec<u32>> {
+    let start = s.find('(')?;
+    let end = s.rfind(')')?;
+    if end <= start { return None; }
+    s[start + 1..end]
+        .split(',')
+        .map(|v| v.trim().parse::<u32>().ok())
+        .collect()
 }
 
 /// Reads current PPT limits from `ryzenadj --info` (requires pkexec).

@@ -20,6 +20,8 @@ pub struct App {
     shift_input: String,
     // Drag state for fan curve widget
     dragging: Option<usize>,
+    // Visible temperature range for the fan curve graph (zoomed view)
+    fan_view_temp: (f32, f32),
     // In-flight PPT reload from background thread
     ppt_reload_rx: Option<mpsc::Receiver<Option<PptLimits>>>,
 }
@@ -33,6 +35,10 @@ impl App {
         if let Some(ppt) = backend::read_current_ppt() {
             state.ppt = ppt;
         }
+        if let Some(fc) = backend::read_fan_curve(&state.profile) {
+            state.fan_curve = fc;
+        }
+        let fan_view_temp = fit_fan_view(&state.fan_curve.points);
         let ppt_apu_str = state.ppt.apu_limit.to_string();
         let ppt_fast_str = state.ppt.fast_limit.to_string();
         let ppt_slow_str = state.ppt.slow_limit.to_string();
@@ -44,6 +50,7 @@ impl App {
             ppt_slow_str,
             shift_input: String::new(),
             dragging: None,
+            fan_view_temp,
             ppt_reload_rx: None,
         }
     }
@@ -60,6 +67,10 @@ impl eframe::App for App {
                 match backend::apply_profile(&self.state.profile) {
                     Ok(_) => {
                         self.state.status_msg = "⚠ Critical temp! Switched to Performance.".into();
+                        if let Some(fc) = backend::read_fan_curve(&self.state.profile) {
+                            self.fan_view_temp = fit_fan_view(&fc.points);
+                            self.state.fan_curve = fc;
+                        }
                         self.reload_ppt();
                     }
                     Err(e) => self.state.status_msg = format!("⚠ Auto-profile error: {e}"),
@@ -127,6 +138,10 @@ impl App {
                     Ok(_) => {
                         self.state.status_msg =
                             format!("Profile set to {}", self.state.profile.as_str());
+                        if let Some(fc) = backend::read_fan_curve(&self.state.profile) {
+                            self.fan_view_temp = fit_fan_view(&fc.points);
+                            self.state.fan_curve = fc;
+                        }
                         self.reload_ppt();
                     }
                     Err(e) => self.state.status_msg = format!("Error: {e}"),
@@ -197,6 +212,9 @@ impl App {
                         .speed(1),
                 );
                 ui.label("Hysteresis:");
+                if ui.small_button("Fit").on_hover_text("Reset zoom to fit curve").clicked() {
+                    self.fan_view_temp = fit_fan_view(&self.state.fan_curve.points);
+                }
             });
         });
 
@@ -204,6 +222,7 @@ impl App {
             &mut self.state.fan_curve.points,
             self.state.current_temp,
             &mut self.dragging,
+            &mut self.fan_view_temp,
         )
         .show(ui);
 
@@ -224,7 +243,7 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Apply Curve").clicked() {
-                    match backend::apply_fan_curve(&self.state.fan_curve) {
+                    match backend::apply_fan_curve(&self.state.profile, &self.state.fan_curve) {
                         Ok(_) => self.state.status_msg = "Fan curve applied.".into(),
                         Err(e) => self.state.status_msg = format!("Error: {e}"),
                     }
@@ -262,4 +281,15 @@ impl App {
             });
         });
     }
+}
+
+/// Returns a temp view range that fits `points` with 15% padding on each side.
+fn fit_fan_view(points: &[(f32, f32)]) -> (f32, f32) {
+    if points.is_empty() {
+        return (0.0, 100.0);
+    }
+    let min_t = points.iter().map(|(t, _)| *t).fold(f32::INFINITY, f32::min);
+    let max_t = points.iter().map(|(t, _)| *t).fold(f32::NEG_INFINITY, f32::max);
+    let pad = ((max_t - min_t) * 0.15).max(5.0);
+    ((min_t - pad).max(0.0), (max_t + pad).min(100.0))
 }
