@@ -21,7 +21,7 @@ impl Default for Profile {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PptLimits {
     pub apu_limit: u32,  // mW — sustain (stapm)
     pub fast_limit: u32, // mW — short-term burst

@@ -5,6 +5,7 @@ use std::time::Duration;
 use egui::{Color32, RichText, Ui};
 
 use crate::backend;
+use crate::profiles::{self, SavedProfile};
 use crate::state::{AppState, PptLimits, Profile};
 use crate::watcher::SensorReading;
 use crate::widgets::fan_curve::FanCurveWidget;
@@ -24,6 +25,10 @@ pub struct App {
     fan_view_temp: (f32, f32),
     // In-flight PPT reload from background thread
     ppt_reload_rx: Option<mpsc::Receiver<Option<PptLimits>>>,
+    // Saved profiles
+    saved_profiles: Vec<SavedProfile>,
+    selected_profile_name: String,
+    new_profile_name: String,
 }
 
 impl App {
@@ -42,6 +47,8 @@ impl App {
         let ppt_apu_str = state.ppt.apu_limit.to_string();
         let ppt_fast_str = state.ppt.fast_limit.to_string();
         let ppt_slow_str = state.ppt.slow_limit.to_string();
+        let saved_profiles = profiles::load();
+        let selected_profile_name = saved_profiles.first().map(|p| p.name.clone()).unwrap_or_default();
         App {
             state,
             rx,
@@ -52,6 +59,9 @@ impl App {
             dragging: None,
             fan_view_temp,
             ppt_reload_rx: None,
+            saved_profiles,
+            selected_profile_name,
+            new_profile_name: String::new(),
         }
     }
 }
@@ -110,6 +120,11 @@ impl eframe::App for App {
             ui.add_space(8.0);
 
             self.show_fan_curve_section(ui);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            self.show_profiles_section(ui);
             ui.add_space(8.0);
             ui.separator();
 
@@ -250,6 +265,139 @@ impl App {
                 }
             });
         });
+    }
+
+    fn show_profiles_section(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Saved Profiles").strong());
+
+        // Save row
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            ui.add(egui::TextEdit::singleline(&mut self.new_profile_name).desired_width(140.0));
+            let has_name = !self.new_profile_name.trim().is_empty();
+            if ui.add_enabled(has_name, egui::Button::new("Save PPT")).clicked() {
+                self.save_profile(true, false);
+            }
+            if ui.add_enabled(has_name, egui::Button::new("Save Curve")).clicked() {
+                self.save_profile(false, true);
+            }
+            if ui.add_enabled(has_name, egui::Button::new("Save Both")).clicked() {
+                self.save_profile(true, true);
+            }
+        });
+
+        // Load / delete row
+        ui.horizontal(|ui| {
+            let combo_label = self
+                .saved_profiles
+                .iter()
+                .find(|p| p.name == self.selected_profile_name)
+                .map(|p| {
+                    let tag = match (p.ppt.is_some(), p.fan_curve.is_some()) {
+                        (true,  true)  => "PF",
+                        (true,  false) => "P",
+                        (false, true)  => "F",
+                        (false, false) => "—",
+                    };
+                    format!("[{tag}] {}", p.name)
+                })
+                .unwrap_or_else(|| "— select —".into());
+            egui::ComboBox::from_id_salt("profile_select")
+                .selected_text(combo_label)
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    for p in &self.saved_profiles {
+                        let tag = match (p.ppt.is_some(), p.fan_curve.is_some()) {
+                            (true,  true)  => "PF",
+                            (true,  false) => "P",
+                            (false, true)  => "F",
+                            (false, false) => "—",
+                        };
+                        ui.selectable_value(
+                            &mut self.selected_profile_name,
+                            p.name.clone(),
+                            format!("[{tag}] {}", p.name),
+                        );
+                    }
+                });
+
+            let has_selection = self
+                .saved_profiles
+                .iter()
+                .any(|p| p.name == self.selected_profile_name);
+
+            if ui.add_enabled(has_selection, egui::Button::new("Load")).clicked() {
+                self.load_selected_profile();
+            }
+            if ui.add_enabled(has_selection, egui::Button::new("Delete")).clicked() {
+                self.saved_profiles.retain(|p| p.name != self.selected_profile_name);
+                self.selected_profile_name = self
+                    .saved_profiles
+                    .first()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                profiles::save(&self.saved_profiles);
+                self.state.status_msg = "Profile deleted.".into();
+            }
+        });
+    }
+
+    fn save_profile(&mut self, include_ppt: bool, include_curve: bool) {
+        let name = self.new_profile_name.trim().to_string();
+        let profile = SavedProfile {
+            name: name.clone(),
+            ppt: include_ppt.then(|| self.state.ppt.clone()),
+            fan_curve: include_curve.then(|| self.state.fan_curve.points.clone()),
+        };
+        profiles::upsert(&mut self.saved_profiles, profile);
+        profiles::save(&self.saved_profiles);
+        self.selected_profile_name = name;
+        self.state.status_msg = "Profile saved.".into();
+    }
+
+    fn load_selected_profile(&mut self) {
+        let Some(profile) = self
+            .saved_profiles
+            .iter()
+            .find(|p| p.name == self.selected_profile_name)
+            .cloned()
+        else {
+            return;
+        };
+
+        let mut parts = Vec::new();
+
+        if let Some(ppt) = profile.ppt {
+            self.ppt_apu_str = ppt.apu_limit.to_string();
+            self.ppt_fast_str = ppt.fast_limit.to_string();
+            self.ppt_slow_str = ppt.slow_limit.to_string();
+            self.state.ppt = ppt;
+            match backend::apply_ppt(&self.state.ppt) {
+                Ok(_) => parts.push("PPT"),
+                Err(e) => {
+                    self.state.status_msg = format!("PPT error: {e}");
+                    return;
+                }
+            }
+        }
+
+        if let Some(points) = profile.fan_curve {
+            self.state.fan_curve.points = points;
+            self.fan_view_temp = fit_fan_view(&self.state.fan_curve.points);
+            match backend::apply_fan_curve(&self.state.profile, &self.state.fan_curve) {
+                Ok(_) => parts.push("fan curve"),
+                Err(e) => {
+                    self.state.status_msg = format!("Fan curve error: {e}");
+                    return;
+                }
+            }
+        }
+
+        self.state.status_msg = if parts.is_empty() {
+            "Profile loaded (nothing to apply).".into()
+        } else {
+            format!("Loaded: {}.", parts.join(" + "))
+        };
     }
 
     fn reload_ppt(&mut self) {

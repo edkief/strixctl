@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod profiles;
 mod state;
 mod watcher;
 mod widgets;
