@@ -1,9 +1,11 @@
 use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use egui::{Color32, RichText, Ui};
 
 use crate::backend;
-use crate::state::{AppState, Profile};
+use crate::state::{AppState, PptLimits, Profile};
 use crate::watcher::SensorReading;
 use crate::widgets::fan_curve::FanCurveWidget;
 
@@ -18,6 +20,8 @@ pub struct App {
     shift_input: String,
     // Drag state for fan curve widget
     dragging: Option<usize>,
+    // In-flight PPT reload from background thread
+    ppt_reload_rx: Option<mpsc::Receiver<Option<PptLimits>>>,
 }
 
 impl App {
@@ -40,6 +44,7 @@ impl App {
             ppt_slow_str,
             shift_input: String::new(),
             dragging: None,
+            ppt_reload_rx: None,
         }
     }
 }
@@ -58,6 +63,20 @@ impl eframe::App for App {
                         self.reload_ppt();
                     }
                     Err(e) => self.state.status_msg = format!("⚠ Auto-profile error: {e}"),
+                }
+            }
+        }
+
+        // Receive completed PPT reload from background thread
+        if let Some(rx) = &self.ppt_reload_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.ppt_reload_rx = None;
+                if let Some(ppt) = result {
+                    self.ppt_apu_str = ppt.apu_limit.to_string();
+                    self.ppt_fast_str = ppt.fast_limit.to_string();
+                    self.ppt_slow_str = ppt.slow_limit.to_string();
+                    self.state.ppt = ppt;
+                    self.state.status_msg = "Power limits synced.".into();
                 }
             }
         }
@@ -137,7 +156,7 @@ impl App {
                 _ => false,
             };
 
-            let apply_btn = ui.add_enabled(valid, egui::Button::new("Apply"));
+            let apply_btn = ui.add_enabled(valid && self.ppt_reload_rx.is_none(), egui::Button::new("Apply"));
             if apply_btn.clicked() {
                 if let (Ok(a), Ok(sl), Ok(f)) = parsed {
                     self.state.ppt.apu_limit = a;
@@ -215,12 +234,15 @@ impl App {
     }
 
     fn reload_ppt(&mut self) {
-        if let Some(ppt) = backend::read_current_ppt() {
-            self.ppt_apu_str = ppt.apu_limit.to_string();
-            self.ppt_fast_str = ppt.fast_limit.to_string();
-            self.ppt_slow_str = ppt.slow_limit.to_string();
-            self.state.ppt = ppt;
-        }
+        let (tx, rx) = mpsc::channel();
+        self.ppt_reload_rx = Some(rx);
+        self.state.status_msg = "Syncing power limits...".into();
+        // Sleep off-thread so asusd can finish its power-state transitions
+        // (EPP, PPT) before ryzenadj touches the same registers.
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(800));
+            let _ = tx.send(backend::read_current_ppt());
+        });
     }
 
     fn show_status_bar(&self, ui: &mut Ui) {

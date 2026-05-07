@@ -12,6 +12,7 @@ pub fn apply_ppt(ppt: &PptLimits) -> Result<(), String> {
         &format!("--stapm-limit={}", ppt.apu_limit),
         &format!("--fast-limit={}", ppt.fast_limit),
         &format!("--slow-limit={}", ppt.slow_limit),
+        &format!("--apu-slow-limit={}", ppt.apu_limit),
     ])
 }
 
