@@ -21,6 +21,9 @@ pub struct App {
     shift_input: String,
     // Drag state for fan curve widget
     dragging: Option<usize>,
+    // Multi-selection state for fan curve widget
+    fan_selected: Vec<usize>,
+    fan_select_drag: Option<f32>,
     // Visible temperature range for the fan curve graph (zoomed view)
     fan_view_temp: (f32, f32),
     // In-flight PPT reload from background thread
@@ -57,6 +60,8 @@ impl App {
             ppt_slow_str,
             shift_input: String::new(),
             dragging: None,
+            fan_selected: Vec::new(),
+            fan_select_drag: None,
             fan_view_temp,
             ppt_reload_rx: None,
             saved_profiles,
@@ -238,6 +243,8 @@ impl App {
             self.state.current_temp,
             &mut self.dragging,
             &mut self.fan_view_temp,
+            &mut self.fan_selected,
+            &mut self.fan_select_drag,
         )
         .show(ui);
 

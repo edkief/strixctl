@@ -7,6 +7,8 @@ pub struct FanCurveWidget<'a> {
     current_temp: f32,
     dragging: &'a mut Option<usize>,
     view_temp: &'a mut (f32, f32),
+    selected: &'a mut Vec<usize>,
+    select_drag: &'a mut Option<f32>,
 }
 
 impl<'a> FanCurveWidget<'a> {
@@ -15,11 +17,15 @@ impl<'a> FanCurveWidget<'a> {
         current_temp: f32,
         dragging: &'a mut Option<usize>,
         view_temp: &'a mut (f32, f32),
+        selected: &'a mut Vec<usize>,
+        select_drag: &'a mut Option<f32>,
     ) -> Self {
-        Self { points, current_temp, dragging, view_temp }
+        Self { points, current_temp, dragging, view_temp, selected, select_drag }
     }
 
     pub fn show(self, ui: &mut Ui) -> Response {
+        sanitize(self.points);
+
         let desired = Vec2::new(ui.available_width(), 220.0);
         let (response, painter) = ui.allocate_painter(desired, Sense::click_and_drag());
         let rect = response.rect;
@@ -76,6 +82,16 @@ impl<'a> FanCurveWidget<'a> {
             (temp, speed)
         };
 
+        let nearest_point = |cursor: Pos2| -> Option<usize> {
+            self.points
+                .iter()
+                .enumerate()
+                .map(|(i, &(t, s))| (i, to_screen(t, s).distance(cursor)))
+                .filter(|(_, d)| *d < SNAP_RADIUS * 2.0)
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .map(|(i, _)| i)
+        };
+
         // Scroll to zoom around cursor position
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
@@ -93,39 +109,127 @@ impl<'a> FanCurveWidget<'a> {
             }
         }
 
-        // Drag interaction
+        // Cancel selection on click over empty space
+        if response.clicked() {
+            let on_dot = response
+                .interact_pointer_pos()
+                .and_then(|c| nearest_point(c))
+                .is_some();
+            if !on_dot {
+                self.selected.clear();
+            }
+        }
+
+        let shift_held = ui.input(|i| i.modifiers.shift);
+
         if let Some(cursor) = response.interact_pointer_pos() {
             if response.drag_started() {
-                let nearest = self
-                    .points
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(t, s))| (i, to_screen(t, s).distance(cursor)))
-                    .filter(|(_, d)| *d < SNAP_RADIUS * 2.0)
-                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-                *self.dragging = nearest.map(|(i, _)| i);
+                if shift_held {
+                    let (temp, _) = to_data(cursor);
+                    *self.select_drag = Some(temp);
+                    *self.dragging = None;
+                } else {
+                    match nearest_point(cursor) {
+                        Some(idx) => {
+                            if !self.selected.contains(&idx) {
+                                self.selected.clear();
+                            }
+                            *self.dragging = Some(idx);
+                        }
+                        None => {
+                            self.selected.clear();
+                            *self.dragging = None;
+                        }
+                    }
+                }
             }
+
             if response.dragged() {
-                if let Some(idx) = *self.dragging {
-                    self.points[idx] = {
-                    let (temp, mut speed) = to_data(cursor);
-                    // Ensure monotonic speed: clamp between neighboring points
-                    if idx > 0 {
-                        let prev_speed = self.points[idx - 1].1;
-                        if speed < prev_speed { speed = prev_speed; }
+                if let Some(start_temp) = *self.select_drag {
+                    // Update rubber-band selection by temperature range
+                    let (cur_temp, _) = to_data(cursor);
+                    let (lo, hi) = if start_temp <= cur_temp {
+                        (start_temp, cur_temp)
+                    } else {
+                        (cur_temp, start_temp)
+                    };
+                    *self.selected = self.points
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &(t, _))| t >= lo && t <= hi)
+                        .map(|(i, _)| i)
+                        .collect();
+                } else if let Some(idx) = *self.dragging {
+                    if self.selected.len() > 1 && self.selected.contains(&idx) {
+                        // Group move: both axes
+                        let drag_delta = response.drag_delta();
+                        let delta_speed = -drag_delta.y / rect.height() * 100.0;
+                        let delta_temp = drag_delta.x / rect.width() * (vt.1 - vt.0);
+                        let clamped_speed =
+                            clamp_group_delta(self.points, self.selected, delta_speed);
+                        let clamped_temp =
+                            clamp_group_temp_delta(self.points, self.selected, delta_temp, vt);
+                        for &i in self.selected.iter() {
+                            self.points[i].0 =
+                                (self.points[i].0 + clamped_temp).clamp(vt.0, vt.1);
+                            self.points[i].1 =
+                                (self.points[i].1 + clamped_speed).clamp(0.0, 100.0);
+                        }
+                    } else {
+                        // Single-point drag: move both axes with monotonic constraint
+                        self.points[idx] = {
+                            let (temp, mut speed) = to_data(cursor);
+                            if idx > 0 {
+                                let prev = self.points[idx - 1].1;
+                                if speed < prev { speed = prev; }
+                            }
+                            if idx + 1 < self.points.len() {
+                                let next = self.points[idx + 1].1;
+                                if speed > next { speed = next; }
+                            }
+                            (temp, speed)
+                        };
                     }
-                    if idx + 1 < self.points.len() {
-                        let next_speed = self.points[idx + 1].1;
-                        if speed > next_speed { speed = next_speed; }
-                    }
-                    (temp, speed)
-                };
                 }
             }
         }
+
         if response.drag_stopped() {
+            let was_select_drag = self.select_drag.is_some();
+            *self.select_drag = None;
+            let is_group_move = self.dragging
+                .map(|idx| self.selected.len() > 1 && self.selected.contains(&idx))
+                .unwrap_or(false);
+            // Only clear selection + re-sort on a plain single-point drag.
+            // Rubber-band end and group-move end must keep the selection alive.
+            if !was_select_drag && !is_group_move {
+                self.points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                self.selected.clear();
+            }
             *self.dragging = None;
-            self.points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        }
+
+        // Draw rubber-band selection rectangle
+        if let (Some(start_temp), Some(cursor)) =
+            (*self.select_drag, response.interact_pointer_pos())
+        {
+            let (cur_temp, _) = to_data(cursor);
+            let x1 = rect.left() + (start_temp - vt.0) / (vt.1 - vt.0) * rect.width();
+            let x2 = rect.left() + (cur_temp - vt.0) / (vt.1 - vt.0) * rect.width();
+            let sel_rect = egui::Rect::from_x_y_ranges(
+                x1.min(x2)..=x1.max(x2),
+                rect.top()..=rect.bottom(),
+            );
+            painter.rect_filled(
+                sel_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(100, 160, 255, 35),
+            );
+            painter.rect_stroke(
+                sel_rect,
+                0.0,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(100, 160, 255, 160)),
+            );
         }
 
         // Connecting curve
@@ -138,9 +242,16 @@ impl<'a> FanCurveWidget<'a> {
         // Control points
         for (i, &(t, s)) in self.points.iter().enumerate() {
             let pos = to_screen(t, s);
+            let is_selected = self.selected.contains(&i);
             let active = *self.dragging == Some(i);
-            let color = if active { Color32::WHITE } else { Color32::from_rgb(100, 200, 255) };
-            let r = if active { 8.0 } else { 6.0 };
+            let color = if active {
+                Color32::WHITE
+            } else if is_selected {
+                Color32::from_rgb(255, 210, 60)
+            } else {
+                Color32::from_rgb(100, 200, 255)
+            };
+            let r = if active { 8.0 } else if is_selected { 7.0 } else { 6.0 };
             painter.circle_filled(pos, r, color);
             painter.circle_stroke(pos, r, Stroke::new(1.5, Color32::WHITE));
         }
@@ -189,6 +300,79 @@ impl<'a> FanCurveWidget<'a> {
 
         response
     }
+}
+
+/// Sorts points by temperature and enforces monotonically non-decreasing fan speed.
+/// Any point whose speed is below its predecessor's speed is snapped up to match it.
+pub fn sanitize(points: &mut Vec<(f32, f32)>) {
+    points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for i in 1..points.len() {
+        let prev_speed = points[i - 1].1;
+        if points[i].1 < prev_speed {
+            points[i].1 = prev_speed;
+        }
+    }
+}
+
+/// Clamps a group temperature delta so all selected points stay within the view range
+/// and do not cross their non-selected boundary neighbours.
+fn clamp_group_temp_delta(
+    points: &[(f32, f32)],
+    selected: &[usize],
+    delta: f32,
+    vt: (f32, f32),
+) -> f32 {
+    if selected.is_empty() {
+        return delta;
+    }
+    let mut lo = -f32::INFINITY;
+    let mut hi = f32::INFINITY;
+
+    for &i in selected {
+        lo = lo.max(vt.0 - points[i].0);
+        hi = hi.min(vt.1 - points[i].0);
+    }
+
+    let min_sel = *selected.iter().min().unwrap();
+    let max_sel = *selected.iter().max().unwrap();
+
+    if min_sel > 0 {
+        lo = lo.max(points[min_sel - 1].0 - points[min_sel].0);
+    }
+    if max_sel + 1 < points.len() {
+        hi = hi.min(points[max_sel + 1].0 - points[max_sel].0);
+    }
+
+    if lo > hi { 0.0 } else { delta.clamp(lo, hi) }
+}
+
+/// Clamps a group speed delta so all selected points stay in [0, 100] and respect
+/// their non-selected boundary neighbours (monotonic constraint).
+fn clamp_group_delta(points: &[(f32, f32)], selected: &[usize], delta: f32) -> f32 {
+    if selected.is_empty() {
+        return delta;
+    }
+    let mut lo = -f32::INFINITY;
+    let mut hi = f32::INFINITY;
+
+    for &i in selected {
+        lo = lo.max(-points[i].1);           // speed + delta >= 0
+        hi = hi.min(100.0 - points[i].1);    // speed + delta <= 100
+    }
+
+    let min_sel = *selected.iter().min().unwrap();
+    let max_sel = *selected.iter().max().unwrap();
+
+    if min_sel > 0 {
+        // leftmost selected must stay >= its left neighbour
+        lo = lo.max(points[min_sel - 1].1 - points[min_sel].1);
+    }
+    if max_sel + 1 < points.len() {
+        // rightmost selected must stay <= its right neighbour
+        hi = hi.min(points[max_sel + 1].1 - points[max_sel].1);
+    }
+
+    if lo > hi { 0.0 } else { delta.clamp(lo, hi) }
 }
 
 /// Returns nicely-rounded tick values for a given range.
