@@ -1,8 +1,8 @@
 [package]
-name = "strixctrl"
+name = "strixctl"
 version = "0.1.0"
 edition = "2024"
-default-run = "strixctrl"
+default-run = "strixctl"
 
 [dependencies]
 eframe = "0.29"
@@ -17,6 +17,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 daemon = ["zbus", "tokio"]
 
 [[bin]]
-name = "strixctrld"
-path = "src/bin/strixctrld.rs"
+name = "strixctld"
+path = "src/bin/strixctld.rs"
 required-features = ["daemon"]

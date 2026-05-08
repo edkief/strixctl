@@ -9,11 +9,11 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const DBUS_NAME = 'com.strixctrl.Service';
-const DBUS_PATH = '/com/strixctrl/Service';
+const DBUS_NAME = 'com.strixctl.Service';
+const DBUS_PATH = '/com/strixctl/Service';
 
 const IFACE_XML = `<node>
-  <interface name="com.strixctrl.Service">
+  <interface name="com.strixctl.Service">
     <method name="ListSavedProfiles">
       <arg type="as" direction="out" name="profiles"/>
     </method>
@@ -30,12 +30,12 @@ const IFACE_XML = `<node>
   </interface>
 </node>`;
 
-const StrixCtrlProxy = Gio.DBusProxy.makeProxyWrapper(IFACE_XML);
+const StrixCtlProxy = Gio.DBusProxy.makeProxyWrapper(IFACE_XML);
 
 // ── Quick Settings toggle ─────────────────────────────────────────────────
 
-const StrixCtrlToggle = GObject.registerClass(
-class StrixCtrlToggle extends QuickSettings.QuickMenuToggle {
+const StrixCtlToggle = GObject.registerClass(
+class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
     _init(proxy) {
         super._init({
             title: 'Profiles',
@@ -48,7 +48,7 @@ class StrixCtrlToggle extends QuickSettings.QuickMenuToggle {
         this._activeProfile = null;
         this._tempC = proxy.CurrentTempC ?? null;
 
-        this.menu.setHeader('power-profile-performance-symbolic', 'strixctrl');
+        this.menu.setHeader('power-profile-performance-symbolic', 'strixctl');
         this._updateSubtitle();
 
         // Refresh profile list each time the menu is opened.
@@ -91,7 +91,7 @@ class StrixCtrlToggle extends QuickSettings.QuickMenuToggle {
 
     _buildMenu() {
         this.menu.removeAll();
-        this.menu.setHeader('power-profile-performance-symbolic', 'strixctrl Profiles');
+        this.menu.setHeader('power-profile-performance-symbolic', 'strixctl Profiles');
 
         if (!this._profiles.length) {
             const placeholder = new PopupMenu.PopupMenuItem(
@@ -122,7 +122,7 @@ class StrixCtrlToggle extends QuickSettings.QuickMenuToggle {
                 const detail = raw.replace(/^.*?:\s*/, '');
                 this._lastError = detail;
                 this.subtitle = `⚠ ${name}`;
-                Main.notify('strixctrl — apply failed', detail);
+                Main.notify('strixctl — apply failed', detail);
                 // Rebuild so the checkmark reflects unchanged state.
                 this._buildMenu();
                 return;
@@ -157,11 +157,11 @@ class StrixCtrlToggle extends QuickSettings.QuickMenuToggle {
 
 // ── System indicator (the icon that sits in the status bar) ──────────────
 
-const StrixCtrlIndicator = GObject.registerClass(
-class StrixCtrlIndicator extends QuickSettings.SystemIndicator {
+const StrixCtlIndicator = GObject.registerClass(
+class StrixCtlIndicator extends QuickSettings.SystemIndicator {
     _init(proxy) {
         super._init();
-        this._toggle = new StrixCtrlToggle(proxy);
+        this._toggle = new StrixCtlToggle(proxy);
         this.quickSettingsItems.push(this._toggle);
     }
 
@@ -183,16 +183,16 @@ function _showProfileOSD(label) {
             false                                                // no level bar
         );
     } catch (e) {
-        logError(e, 'strixctrl: OSD');
+        logError(e, 'strixctl: OSD');
     }
 }
 
 // ── Extension entry point ─────────────────────────────────────────────────
 
-export default class StrixCtrlExtension extends Extension {
+export default class StrixCtlExtension extends Extension {
     enable() {
         // Proxy is created synchronously; D-Bus activation fires on first method call.
-        this._proxy = new StrixCtrlProxy(
+        this._proxy = new StrixCtlProxy(
             Gio.DBus.session,
             DBUS_NAME,
             DBUS_PATH,
@@ -201,7 +201,7 @@ export default class StrixCtrlExtension extends Extension {
             Gio.DBusProxyFlags.DO_NOT_AUTO_START_AT_CONSTRUCTION
         );
 
-        this._indicator = new StrixCtrlIndicator(this._proxy);
+        this._indicator = new StrixCtlIndicator(this._proxy);
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
 
         // Hotkey: default <Super>p, configurable in prefs or via gsettings.

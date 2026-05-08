@@ -3,7 +3,7 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <action id="com.strixctrl.ryzenadj">
+  <action id="com.strixctl.ryzenadj">
     <description>Adjust AMD CPU power limits via ryzenadj</description>
     <message>Authentication required to adjust CPU power limits</message>
     <defaults>

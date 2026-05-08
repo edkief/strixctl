@@ -1,0 +1,11 @@
+[Unit]
+Description=strixctl D-Bus daemon
+Documentation=https://github.com/ekieffer/strixctl
+
+[Service]
+ExecStart=%h/.cargo/bin/strixctld
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

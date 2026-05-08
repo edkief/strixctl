@@ -7,7 +7,7 @@ else
 SUDO := sudo
 endif
 
-EXTENSION_UUID := strixctrl@strixctrl
+EXTENSION_UUID := strixctl@strixctl
 EXTENSION_DIR  := $(HOME)/.local/share/gnome-shell/extensions/$(EXTENSION_UUID)
 DBUS_USER_DIR  := $(HOME)/.local/share/dbus-1/services
 
@@ -17,21 +17,21 @@ DBUS_USER_DIR  := $(HOME)/.local/share/dbus-1/services
 
 build:
 	cargo build --release
-	cargo build --release --features daemon --bin strixctrld
+	cargo build --release --features daemon --bin strixctld
 
 build-daemon:
-	cargo build --release --features daemon --bin strixctrld
+	cargo build --release --features daemon --bin strixctld
 
 # ── System install (needs sudo) ───────────────────────────────────────────
 
 .PHONY: install-polkit uninstall-polkit
 
 install-polkit:
-	$(SUDO) install -Dm644 polkit/com.strixctrl.ryzenadj.policy \
-	  /usr/share/polkit-1/actions/com.strixctrl.ryzenadj.policy
+	$(SUDO) install -Dm644 polkit/com.strixctl.ryzenadj.policy \
+	  /usr/share/polkit-1/actions/com.strixctl.ryzenadj.policy
 
 uninstall-polkit:
-	$(SUDO) rm -f /usr/share/polkit-1/actions/com.strixctrl.ryzenadj.policy
+	$(SUDO) rm -f /usr/share/polkit-1/actions/com.strixctl.ryzenadj.policy
 
 # ── User installs (no sudo) ───────────────────────────────────────────────
 
@@ -39,21 +39,21 @@ uninstall-polkit:
 .PHONY: uninstall-daemon uninstall-extension
 
 # cargo install puts the binary in ~/.cargo/bin/, matching the ExecStart in
-# systemd/strixctrld.service.  The D-Bus session activation file goes in the
+# systemd/strixctld.service.  The D-Bus session activation file goes in the
 # XDG user services dir so the session bus can auto-start the daemon.
 install-daemon:
-	cargo install --path . --features daemon --bin strixctrld
+	cargo install --path . --features daemon --bin strixctld
 	install -d $(DBUS_USER_DIR)
-	printf '[D-BUS Service]\nName=com.strixctrl.Service\nExec=%s/.cargo/bin/strixctrld\n' \
-	    '$(HOME)' > $(DBUS_USER_DIR)/com.strixctrl.Service.service
+	printf '[D-BUS Service]\nName=com.strixctl.Service\nExec=%s/.cargo/bin/strixctld\n' \
+	    '$(HOME)' > $(DBUS_USER_DIR)/com.strixctl.Service.service
 
 uninstall-daemon:
-	-cargo uninstall strixctrld
-	rm -f $(DBUS_USER_DIR)/com.strixctrl.Service.service
+	-cargo uninstall strixctld
+	rm -f $(DBUS_USER_DIR)/com.strixctl.Service.service
 
 install-systemd:
-	install -Dm644 systemd/strixctrld.service \
-	  $(HOME)/.config/systemd/user/strixctrld.service
+	install -Dm644 systemd/strixctld.service \
+	  $(HOME)/.config/systemd/user/strixctld.service
 	systemctl --user daemon-reload
 
 install-extension:
@@ -72,7 +72,7 @@ uninstall-extension:
 .PHONY: all uninstall
 
 all: install-polkit install-daemon install-systemd install-extension
-	systemctl --user restart strixctrld || systemctl --user start strixctrld
+	systemctl --user restart strixctld || systemctl --user start strixctld
 	@echo ""
 	@echo "Installation complete."
 	@echo "Enable the GNOME extension with:"
@@ -80,8 +80,8 @@ all: install-polkit install-daemon install-systemd install-extension
 	@echo "Reload GNOME Shell:  Alt+F2 → r  (X11)  or log out/in (Wayland)"
 
 uninstall: uninstall-daemon uninstall-polkit uninstall-extension
-	-systemctl --user stop    strixctrld
-	-systemctl --user disable strixctrld
-	rm -f $(HOME)/.config/systemd/user/strixctrld.service
+	-systemctl --user stop    strixctld
+	-systemctl --user disable strixctld
+	rm -f $(HOME)/.config/systemd/user/strixctld.service
 	systemctl --user daemon-reload
 	@echo "Uninstalled."

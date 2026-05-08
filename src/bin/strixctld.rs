@@ -1,8 +1,8 @@
-//! strixctrld — session D-Bus service for strixctrl.
+//! strixctld — session D-Bus service for strixctl.
 //!
-//! Bus name  : com.strixctrl.Service
-//! Object    : /com/strixctrl/Service
-//! Interface : com.strixctrl.Service
+//! Bus name  : com.strixctl.Service
+//! Object    : /com/strixctl/Service
+//! Interface : com.strixctl.Service
 //!
 //! Methods
 //!   ListSavedProfiles()                       -> as
@@ -33,13 +33,13 @@ use crate::state::{FanCurve, PptLimits, Profile};
 
 // ── D-Bus interface ──────────────────────────────────────────────────────────
 
-struct StrixCtrlService {
+struct StrixCtlService {
     current_temp: Arc<Mutex<f64>>,
 }
 
-#[interface(name = "com.strixctrl.Service")]
-impl StrixCtrlService {
-    /// Returns the names of all saved profiles from ~/.config/strixctrl/profiles.json.
+#[interface(name = "com.strixctl.Service")]
+impl StrixCtlService {
+    /// Returns the names of all saved profiles from ~/.config/strixctl/profiles.json.
     fn list_saved_profiles(&self) -> Vec<String> {
         profiles::load().into_iter().map(|p| p.name).collect()
     }
@@ -134,11 +134,11 @@ impl StrixCtrlService {
 async fn main() -> zbus::Result<()> {
     let current_temp = Arc::new(Mutex::new(0.0f64));
 
-    let service = StrixCtrlService { current_temp: current_temp.clone() };
+    let service = StrixCtlService { current_temp: current_temp.clone() };
 
     let conn = connection::Builder::session()?
-        .name("com.strixctrl.Service")?
-        .serve_at("/com/strixctrl/Service", service)?
+        .name("com.strixctl.Service")?
+        .serve_at("/com/strixctl/Service", service)?
         .build()
         .await?;
 
@@ -157,10 +157,10 @@ async fn main() -> zbus::Result<()> {
                 last_emitted = temp;
                 if let Ok(iref) = conn_clone
                     .object_server()
-                    .interface::<_, StrixCtrlService>("/com/strixctrl/Service")
+                    .interface::<_, StrixCtlService>("/com/strixctl/Service")
                     .await
                 {
-                    let _ = StrixCtrlService::temp_changed(iref.signal_context(), temp).await;
+                    let _ = StrixCtlService::temp_changed(iref.signal_context(), temp).await;
                 }
             }
         }

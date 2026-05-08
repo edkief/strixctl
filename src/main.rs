@@ -16,14 +16,14 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("strixctrl")
+            .with_title("strixctl")
             .with_inner_size([640.0, 560.0])
             .with_min_inner_size([480.0, 400.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "strixctrl",
+        "strixctl",
         options,
         Box::new(|_cc| Ok(Box::new(App::new(AppState::default(), rx)))),
     )

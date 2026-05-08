@@ -106,7 +106,7 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("strixctrl");
+            ui.heading("strixctl");
             ui.add_space(4.0);
 
             self.show_profile_section(ui);

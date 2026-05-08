@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="org.gnome.shell.extensions.strixctrl"
-          path="/org/gnome/shell/extensions/strixctrl/">
+  <schema id="org.gnome.shell.extensions.strixctl"
+          path="/org/gnome/shell/extensions/strixctl/">
 
     <key name="cycle-profiles-key" type="as">
       <default>["&lt;Super&gt;p"]</default>
-      <summary>Cycle strixctrl profiles</summary>
+      <summary>Cycle strixctl profiles</summary>
       <description>
-        Keyboard shortcut to cycle to the next saved strixctrl profile.
+        Keyboard shortcut to cycle to the next saved strixctl profile.
         On ASUS ROG laptops the Fn+Q key often appears as XF86Launch1 —
         set this key to ["XF86Launch1"] to use it.
       </description>

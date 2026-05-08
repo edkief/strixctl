@@ -48,5 +48,5 @@ fn profiles_path() -> PathBuf {
         .unwrap_or_else(|_| {
             PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
         });
-    config_dir.join("strixctrl").join("profiles.json")
+    config_dir.join("strixctl").join("profiles.json")
 }
