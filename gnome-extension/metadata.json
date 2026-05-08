@@ -1,0 +1,9 @@
+{
+  "uuid": "strixctrl@strixctrl",
+  "name": "strixctrl",
+  "description": "Switch strixctrl custom profiles from GNOME Quick Settings",
+  "version": 1,
+  "shell-version": ["46", "47", "48", "50"],
+  "url": "https://github.com/ekieffer/strixctrl",
+  "settings-schema": "org.gnome.shell.extensions.strixctrl"
+}

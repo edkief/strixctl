@@ -7,8 +7,13 @@
     <description>Adjust AMD CPU power limits via ryzenadj</description>
     <message>Authentication required to adjust CPU power limits</message>
     <defaults>
+      <!-- allow_any: remote/unauthenticated still requires admin auth -->
       <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
+      <!-- allow_inactive: local user process in a non-active session (e.g. a
+           systemd user service or D-Bus-activated daemon).  Must be "yes" so
+           the daemon can call pkexec without an interactive auth prompt. -->
+      <allow_inactive>yes</allow_inactive>
+      <!-- allow_active: interactive session, always yes -->
       <allow_active>yes</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/ryzenadj</annotate>
