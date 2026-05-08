@@ -107,7 +107,19 @@ impl<'a> FanCurveWidget<'a> {
             }
             if response.dragged() {
                 if let Some(idx) = *self.dragging {
-                    self.points[idx] = to_data(cursor);
+                    self.points[idx] = {
+                    let (temp, mut speed) = to_data(cursor);
+                    // Ensure monotonic speed: clamp between neighboring points
+                    if idx > 0 {
+                        let prev_speed = self.points[idx - 1].1;
+                        if speed < prev_speed { speed = prev_speed; }
+                    }
+                    if idx + 1 < self.points.len() {
+                        let next_speed = self.points[idx + 1].1;
+                        if speed > next_speed { speed = next_speed; }
+                    }
+                    (temp, speed)
+                };
                 }
             }
         }
