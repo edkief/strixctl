@@ -4,7 +4,7 @@
           path="/org/gnome/shell/extensions/strixctl/">
 
     <key name="cycle-profiles-key" type="as">
-      <default>["&lt;Super&gt;p"]</default>
+      <default>["&lt;Super&gt;c"]</default>
       <summary>Cycle strixctl profiles</summary>
       <description>
         Keyboard shortcut to cycle to the next saved strixctl profile.
