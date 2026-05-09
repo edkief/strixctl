@@ -26,6 +26,7 @@ pub fn apply_fan_curve(profile: &Profile, curve: &FanCurve) -> Result<(), String
         .map(|(t, s)| format!("{}c:{}", *t as u8, (*s / 100.0 * 255.0).round() as u8))
         .collect::<Vec<_>>()
         .join(",");
+    eprintln!("[strixctl] apply_fan_curve: profile={} points={}", profile.as_str(), points_str);
     let profile_str = profile.as_str();
     for fan in ["cpu", "gpu"] {
         run_cmd("asusctl", &[
@@ -156,13 +157,29 @@ pub fn read_current_profile() -> Option<Profile> {
 }
 
 fn run_cmd(prog: &str, args: &[&str]) -> Result<(), String> {
+    eprintln!("[strixctl] >> {} {}", prog, args.join(" "));
     let out = Command::new(prog)
         .args(args)
         .output()
         .map_err(|e| format!("Failed to run {prog}: {e}"))?;
+
+    // Print all output lines uniformly — ryzenadj emits informational text on
+    // stderr, so we don't bother distinguishing the two streams here.
+    for line in String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(&out.stderr).lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
+        eprintln!("[strixctl]  | {line}");
+    }
+
     if out.status.success() {
+        eprintln!("[strixctl] ok");
         Ok(())
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        eprintln!("[strixctl] FAILED ({})", out.status);
+        Err(msg)
     }
 }

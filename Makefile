@@ -35,8 +35,24 @@ uninstall-polkit:
 
 # ── User installs (no sudo) ───────────────────────────────────────────────
 
-.PHONY: install-daemon install-systemd install-extension
-.PHONY: uninstall-daemon uninstall-extension
+.PHONY: install-bin install-desktop install-daemon install-systemd install-extension
+.PHONY: uninstall-bin uninstall-desktop uninstall-daemon uninstall-extension
+
+install-bin:
+	$(SUDO) install -Dm755 target/release/strixctl $(PREFIX)/bin/strixctl
+
+uninstall-bin:
+	$(SUDO) rm -f $(PREFIX)/bin/strixctl
+
+install-desktop:
+	$(SUDO) install -Dm644 strixctl.png $(PREFIX)/share/icons/hicolor/256x256/apps/strixctl.png
+	$(SUDO) install -Dm644 strixctl.desktop $(PREFIX)/share/applications/strixctl.desktop
+	-$(SUDO) gtk-update-icon-cache -f -t $(PREFIX)/share/icons/hicolor
+
+uninstall-desktop:
+	$(SUDO) rm -f $(PREFIX)/share/icons/hicolor/256x256/apps/strixctl.png
+	$(SUDO) rm -f $(PREFIX)/share/applications/strixctl.desktop
+	-$(SUDO) gtk-update-icon-cache -f -t $(PREFIX)/share/icons/hicolor
 
 # cargo install puts the binary in ~/.cargo/bin/, matching the ExecStart in
 # systemd/strixctld.service.  The D-Bus session activation file goes in the
@@ -71,7 +87,7 @@ uninstall-extension:
 
 .PHONY: all uninstall
 
-all: install-polkit install-daemon install-systemd install-extension
+all: build install-bin install-desktop install-polkit install-daemon install-systemd install-extension
 	systemctl --user restart strixctld || systemctl --user start strixctld
 	@echo ""
 	@echo "Installation complete."
@@ -79,7 +95,7 @@ all: install-polkit install-daemon install-systemd install-extension
 	@echo "  gnome-extensions enable $(EXTENSION_UUID)"
 	@echo "Reload GNOME Shell:  Alt+F2 → r  (X11)  or log out/in (Wayland)"
 
-uninstall: uninstall-daemon uninstall-polkit uninstall-extension
+uninstall: uninstall-bin uninstall-desktop uninstall-daemon uninstall-polkit uninstall-extension
 	-systemctl --user stop    strixctld
 	-systemctl --user disable strixctld
 	rm -f $(HOME)/.config/systemd/user/strixctld.service

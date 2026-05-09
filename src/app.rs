@@ -76,6 +76,7 @@ impl eframe::App for App {
         // Drain watcher channel
         while let Ok(reading) = self.rx.try_recv() {
             self.state.current_temp = reading.temp_c;
+            self.state.current_gpu_temp = reading.gpu_temp_c;
             // Auto-safety: max cooling when temp is critical
             if self.state.current_temp > 95.0 && self.state.profile != Profile::Performance {
                 self.state.profile = Profile::Performance;
@@ -111,7 +112,14 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("strixctl");
+            ui.horizontal(|ui| {
+                ui.heading("strixctl");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Reload").on_hover_text("Refresh all settings from system").clicked() {
+                        self.reload_from_system();
+                    }
+                });
+            });
             ui.add_space(4.0);
 
             self.show_profile_section(ui);
@@ -282,14 +290,8 @@ impl App {
             ui.label("Name:");
             ui.add(egui::TextEdit::singleline(&mut self.new_profile_name).desired_width(140.0));
             let has_name = !self.new_profile_name.trim().is_empty();
-            if ui.add_enabled(has_name, egui::Button::new("Save PPT")).clicked() {
-                self.save_profile(true, false);
-            }
-            if ui.add_enabled(has_name, egui::Button::new("Save Curve")).clicked() {
-                self.save_profile(false, true);
-            }
-            if ui.add_enabled(has_name, egui::Button::new("Save Both")).clicked() {
-                self.save_profile(true, true);
+            if ui.add_enabled(has_name, egui::Button::new("Save")).clicked() {
+                self.save_profile();
             }
         });
 
@@ -299,31 +301,17 @@ impl App {
                 .saved_profiles
                 .iter()
                 .find(|p| p.name == self.selected_profile_name)
-                .map(|p| {
-                    let tag = match (p.ppt.is_some(), p.fan_curve.is_some()) {
-                        (true,  true)  => "PF",
-                        (true,  false) => "P",
-                        (false, true)  => "F",
-                        (false, false) => "—",
-                    };
-                    format!("[{tag}] {}", p.name)
-                })
+                .map(|p| p.name.clone())
                 .unwrap_or_else(|| "— select —".into());
             egui::ComboBox::from_id_salt("profile_select")
                 .selected_text(combo_label)
                 .width(180.0)
                 .show_ui(ui, |ui| {
                     for p in &self.saved_profiles {
-                        let tag = match (p.ppt.is_some(), p.fan_curve.is_some()) {
-                            (true,  true)  => "PF",
-                            (true,  false) => "P",
-                            (false, true)  => "F",
-                            (false, false) => "—",
-                        };
                         ui.selectable_value(
                             &mut self.selected_profile_name,
                             p.name.clone(),
-                            format!("[{tag}] {}", p.name),
+                            p.name.clone(),
                         );
                     }
                 });
@@ -335,6 +323,9 @@ impl App {
 
             if ui.add_enabled(has_selection, egui::Button::new("Load")).clicked() {
                 self.load_selected_profile();
+            }
+            if ui.add_enabled(has_selection, egui::Button::new("Apply")).clicked() {
+                self.apply_selected_profile();
             }
             if ui.add_enabled(has_selection, egui::Button::new("Delete")).clicked() {
                 self.saved_profiles.retain(|p| p.name != self.selected_profile_name);
@@ -349,21 +340,23 @@ impl App {
         });
     }
 
-    fn save_profile(&mut self, include_ppt: bool, include_curve: bool) {
+    fn save_profile(&mut self) {
         let name = self.new_profile_name.trim().to_string();
-        let profile = SavedProfile {
+        let saved = SavedProfile {
             name: name.clone(),
-            ppt: include_ppt.then(|| self.state.ppt.clone()),
-            fan_curve: include_curve.then(|| self.state.fan_curve.points.clone()),
+            platform_profile: self.state.profile.clone(),
+            ppt: self.state.ppt.clone(),
+            fan_curve: self.state.fan_curve.points.clone(),
+            fan_hysteresis: self.state.fan_curve.hysteresis,
         };
-        profiles::upsert(&mut self.saved_profiles, profile);
+        profiles::upsert(&mut self.saved_profiles, saved);
         profiles::save(&self.saved_profiles);
         self.selected_profile_name = name;
         self.state.status_msg = "Profile saved.".into();
     }
 
     fn load_selected_profile(&mut self) {
-        let Some(profile) = self
+        let Some(saved) = self
             .saved_profiles
             .iter()
             .find(|p| p.name == self.selected_profile_name)
@@ -372,39 +365,51 @@ impl App {
             return;
         };
 
-        let mut parts = Vec::new();
+        self.state.profile = saved.platform_profile;
+        self.ppt_apu_str = saved.ppt.apu_limit.to_string();
+        self.ppt_fast_str = saved.ppt.fast_limit.to_string();
+        self.ppt_slow_str = saved.ppt.slow_limit.to_string();
+        self.state.ppt = saved.ppt;
+        self.state.fan_curve.points = saved.fan_curve;
+        self.state.fan_curve.hysteresis = saved.fan_hysteresis;
+        self.fan_view_temp = fit_fan_view(&self.state.fan_curve.points);
+        self.state.status_msg = format!("Loaded '{}'.", self.selected_profile_name);
+    }
 
-        if let Some(ppt) = profile.ppt {
+    fn apply_selected_profile(&mut self) {
+        match backend::apply_profile(&self.state.profile) {
+            Ok(_) => {}
+            Err(e) => { self.state.status_msg = format!("Profile error: {e}"); return; }
+        }
+        match backend::apply_ppt(&self.state.ppt) {
+            Ok(_) => {}
+            Err(e) => { self.state.status_msg = format!("PPT error: {e}"); return; }
+        }
+        match backend::apply_fan_curve(&self.state.profile, &self.state.fan_curve) {
+            Ok(_) => {}
+            Err(e) => { self.state.status_msg = format!("Fan curve error: {e}"); return; }
+        }
+        let name = self.selected_profile_name.clone();
+        profiles::save_active(&name);
+        notify_daemon_profile_applied(&name);
+        self.state.status_msg = format!("Applied '{name}'.");
+    }
+
+    fn reload_from_system(&mut self) {
+        if let Some(p) = backend::read_current_profile() {
+            self.state.profile = p;
+        }
+        if let Some(ppt) = backend::read_current_ppt() {
             self.ppt_apu_str = ppt.apu_limit.to_string();
             self.ppt_fast_str = ppt.fast_limit.to_string();
             self.ppt_slow_str = ppt.slow_limit.to_string();
             self.state.ppt = ppt;
-            match backend::apply_ppt(&self.state.ppt) {
-                Ok(_) => parts.push("PPT"),
-                Err(e) => {
-                    self.state.status_msg = format!("PPT error: {e}");
-                    return;
-                }
-            }
         }
-
-        if let Some(points) = profile.fan_curve {
-            self.state.fan_curve.points = points;
+        if let Some(fc) = backend::read_fan_curve(&self.state.profile) {
+            self.state.fan_curve = fc;
             self.fan_view_temp = fit_fan_view(&self.state.fan_curve.points);
-            match backend::apply_fan_curve(&self.state.profile, &self.state.fan_curve) {
-                Ok(_) => parts.push("fan curve"),
-                Err(e) => {
-                    self.state.status_msg = format!("Fan curve error: {e}");
-                    return;
-                }
-            }
         }
-
-        self.state.status_msg = if parts.is_empty() {
-            "Profile loaded (nothing to apply).".into()
-        } else {
-            format!("Loaded: {}.", parts.join(" + "))
-        };
+        self.state.status_msg = "Settings reloaded from system.".into();
     }
 
     fn reload_ppt(&mut self) {
@@ -424,17 +429,39 @@ impl App {
             ui.label(&self.state.status_msg);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.state.current_temp > 0.0 {
-                    let color = if self.state.current_temp > 90.0 {
-                        Color32::from_rgb(255, 80, 80)
-                    } else if self.state.current_temp > 75.0 {
-                        Color32::from_rgb(255, 180, 0)
-                    } else {
-                        Color32::from_rgb(100, 220, 100)
-                    };
-                    ui.colored_label(color, format!("CPU: {:.1}°C", self.state.current_temp));
+                    ui.colored_label(temp_color(self.state.current_temp, 90.0, 75.0),
+                        format!("CPU: {:.1}°C", self.state.current_temp));
+                }
+                if let Some(gpu) = self.state.current_gpu_temp {
+                    ui.colored_label(temp_color(gpu, 90.0, 75.0),
+                        format!("GPU: {:.1}°C", gpu));
                 }
             });
         });
+    }
+}
+
+/// Best-effort D-Bus notification to the daemon that a saved profile was applied.
+/// Spawned as a detached child — failure is silently ignored.
+fn notify_daemon_profile_applied(name: &str) {
+    let _ = std::process::Command::new("gdbus")
+        .args([
+            "call", "--session",
+            "--dest", "com.strixctl.Service",
+            "--object-path", "/com/strixctl/Service",
+            "--method", "com.strixctl.Service.NotifyProfileApplied",
+            &format!("'{}'", name.replace('\'', "\\'")),
+        ])
+        .spawn();
+}
+
+fn temp_color(temp: f32, critical: f32, warn: f32) -> Color32 {
+    if temp > critical {
+        Color32::from_rgb(255, 80, 80)
+    } else if temp > warn {
+        Color32::from_rgb(255, 180, 0)
+    } else {
+        Color32::from_rgb(100, 220, 100)
     }
 }
 

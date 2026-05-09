@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Profile {
     Quiet,
     Balanced,
@@ -81,6 +81,7 @@ pub struct AppState {
     pub ppt: PptLimits,
     pub fan_curve: FanCurve,
     pub current_temp: f32,
+    pub current_gpu_temp: Option<f32>,
     pub current_power: f32,
     pub status_msg: String,
 }
@@ -92,6 +93,7 @@ impl Default for AppState {
             ppt: PptLimits::default(),
             fan_curve: FanCurve::default(),
             current_temp: 0.0,
+            current_gpu_temp: None,
             current_power: 0.0,
             status_msg: String::from("Ready"),
         }

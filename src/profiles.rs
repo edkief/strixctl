@@ -3,15 +3,15 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::PptLimits;
+use crate::state::{Profile, PptLimits};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedProfile {
     pub name: String,
-    /// None means this profile does not touch PPT limits.
-    pub ppt: Option<PptLimits>,
-    /// None means this profile does not touch the fan curve.
-    pub fan_curve: Option<Vec<(f32, f32)>>,
+    pub platform_profile: Profile,
+    pub ppt: PptLimits,
+    pub fan_curve: Vec<(f32, f32)>,
+    pub fan_hysteresis: u8,
 }
 
 /// Upserts `profile` into `list` by name (replaces if name already exists).
@@ -24,7 +24,7 @@ pub fn upsert(list: &mut Vec<SavedProfile>, profile: SavedProfile) {
 }
 
 pub fn load() -> Vec<SavedProfile> {
-    let path = profiles_path();
+    let path = config_dir().join("profiles.json");
     if !path.exists() {
         return Vec::new();
     }
@@ -33,7 +33,7 @@ pub fn load() -> Vec<SavedProfile> {
 }
 
 pub fn save(profiles: &[SavedProfile]) {
-    let path = profiles_path();
+    let path = config_dir().join("profiles.json");
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -42,11 +42,27 @@ pub fn save(profiles: &[SavedProfile]) {
     }
 }
 
-fn profiles_path() -> PathBuf {
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
+/// Persists the name of the last-applied saved profile.
+pub fn save_active(name: &str) {
+    let path = config_dir().join("active-profile");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, name);
+}
+
+/// Returns the last-applied saved profile name, if any.
+pub fn load_active() -> Option<String> {
+    let s = fs::read_to_string(config_dir().join("active-profile")).ok()?;
+    let name = s.trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn config_dir() -> PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
         });
-    config_dir.join("strixctl").join("profiles.json")
+    base.join("strixctl")
 }

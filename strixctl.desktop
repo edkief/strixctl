@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=strixctl
+Comment=ASUS ROG system control
+Exec=strixctl
+Icon=strixctl
+Type=Application
+Categories=System;Settings;

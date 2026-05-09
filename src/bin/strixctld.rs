@@ -35,6 +35,8 @@ use crate::state::{FanCurve, PptLimits, Profile};
 
 struct StrixCtlService {
     current_temp: Arc<Mutex<f64>>,
+    current_profile: Arc<Mutex<String>>,
+    current_saved_profile: Arc<Mutex<String>>,
 }
 
 #[interface(name = "com.strixctl.Service")]
@@ -61,26 +63,24 @@ impl StrixCtlService {
 
         let mut errors: Vec<String> = Vec::new();
 
-        // 1. Fan curve — triggers asusd power-state reload.
-        if let Some(points) = &profile.fan_curve {
-            let asus_profile = backend::read_current_profile().unwrap_or_default();
-            let curve = FanCurve { points: points.clone(), hysteresis: 2 };
-            if let Err(e) = backend::apply_fan_curve(&asus_profile, &curve) {
-                errors.push(format!("fan curve: {e}"));
-            }
+        // 1. Platform profile.
+        if let Err(e) = backend::apply_profile(&profile.platform_profile) {
+            errors.push(format!("platform profile: {e}"));
         }
 
-        // 2. Wait for asusd to finish touching PPT registers before ryzenadj
-        //    writes its own values.  Only needed when both parts are present.
-        if profile.fan_curve.is_some() && profile.ppt.is_some() {
-            tokio::time::sleep(Duration::from_millis(800)).await;
+        // 2. Fan curve — triggers asusd power-state reload.
+        let curve = FanCurve { points: profile.fan_curve.clone(), hysteresis: profile.fan_hysteresis };
+        if let Err(e) = backend::apply_fan_curve(&profile.platform_profile, &curve) {
+            errors.push(format!("fan curve: {e}"));
         }
 
-        // 3. PPT last, so asusd cannot clobber it.
-        if let Some(ppt) = &profile.ppt {
-            if let Err(e) = backend::apply_ppt(ppt) {
-                errors.push(format!("PPT: {e}"));
-            }
+        // 3. Wait for asusd to finish touching PPT registers before ryzenadj
+        //    writes its own values.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        // 4. PPT last, so asusd cannot clobber it.
+        if let Err(e) = backend::apply_ppt(&profile.ppt) {
+            errors.push(format!("PPT: {e}"));
         }
 
         if errors.is_empty() {
@@ -123,9 +123,46 @@ impl StrixCtlService {
         *self.current_temp.lock().unwrap()
     }
 
+    /// Current asusctl platform profile: "quiet", "balanced", or "performance".
+    #[zbus(property)]
+    fn current_platform_profile(&self) -> String {
+        self.current_profile.lock().unwrap().clone()
+    }
+
+    /// Name of the last saved strixctl profile that was applied (empty if none).
+    #[zbus(property)]
+    fn current_saved_profile(&self) -> String {
+        self.current_saved_profile.lock().unwrap().clone()
+    }
+
+    /// Called by the GUI (best-effort) when a saved profile is applied directly.
+    async fn notify_profile_applied(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>, name: &str) -> fdo::Result<()> {
+        let changed = {
+            let mut guard = self.current_saved_profile.lock().unwrap();
+            if *guard != name {
+                *guard = name.to_string();
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            let _ = Self::saved_profile_changed(&ctxt, name).await;
+        }
+        Ok(())
+    }
+
     /// Emitted when the CPU temperature changes by more than 0.5 °C.
     #[zbus(signal)]
     async fn temp_changed(ctxt: &SignalContext<'_>, temp: f64) -> zbus::Result<()>;
+
+    /// Emitted when the asusctl platform profile changes.
+    #[zbus(signal)]
+    async fn platform_profile_changed(ctxt: &SignalContext<'_>, profile: &str) -> zbus::Result<()>;
+
+    /// Emitted when the active saved strixctl profile changes.
+    #[zbus(signal)]
+    async fn saved_profile_changed(ctxt: &SignalContext<'_>, name: &str) -> zbus::Result<()>;
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -133,8 +170,16 @@ impl StrixCtlService {
 #[tokio::main]
 async fn main() -> zbus::Result<()> {
     let current_temp = Arc::new(Mutex::new(0.0f64));
+    let current_profile = Arc::new(Mutex::new(String::new()));
+    let current_saved_profile = Arc::new(Mutex::new(
+        profiles::load_active().unwrap_or_default()
+    ));
 
-    let service = StrixCtlService { current_temp: current_temp.clone() };
+    let service = StrixCtlService {
+        current_temp: current_temp.clone(),
+        current_profile: current_profile.clone(),
+        current_saved_profile: current_saved_profile.clone(),
+    };
 
     let conn = connection::Builder::session()?
         .name("com.strixctl.Service")?
@@ -161,6 +206,69 @@ async fn main() -> zbus::Result<()> {
                     .await
                 {
                     let _ = StrixCtlService::temp_changed(iref.signal_context(), temp).await;
+                }
+            }
+        }
+    });
+
+    // Poll asusctl platform profile every 5 s; emit PlatformProfileChanged on change.
+    let conn_clone2 = conn.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let Some(p) = backend::read_current_profile() else { continue };
+            let name = p.as_str().to_string();
+            let changed = {
+                let mut guard = current_profile.lock().unwrap();
+                if *guard != name {
+                    *guard = name.clone();
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                if let Ok(iref) = conn_clone2
+                    .object_server()
+                    .interface::<_, StrixCtlService>("/com/strixctl/Service")
+                    .await
+                {
+                    let _ = StrixCtlService::platform_profile_changed(
+                        iref.signal_context(), &name,
+                    ).await;
+                }
+            }
+        }
+    });
+
+    // Poll active-profile file every 5 s; emit SavedProfileChanged on change.
+    // This is a fallback for cases where the gdbus notification from the GUI
+    // was not received (e.g. daemon was not yet running).
+    let conn_clone3 = conn.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let name = profiles::load_active().unwrap_or_default();
+            let changed = {
+                let mut guard = current_saved_profile.lock().unwrap();
+                if *guard != name {
+                    *guard = name.clone();
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                if let Ok(iref) = conn_clone3
+                    .object_server()
+                    .interface::<_, StrixCtlService>("/com/strixctl/Service")
+                    .await
+                {
+                    let _ = StrixCtlService::saved_profile_changed(
+                        iref.signal_context(), &name,
+                    ).await;
                 }
             }
         }

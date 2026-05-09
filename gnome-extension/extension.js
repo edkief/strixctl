@@ -24,8 +24,19 @@ const IFACE_XML = `<node>
       <arg type="s" direction="in" name="profile"/>
     </method>
     <property name="CurrentTempC" type="d" access="read"/>
+    <property name="CurrentPlatformProfile" type="s" access="read"/>
+    <property name="CurrentSavedProfile" type="s" access="read"/>
+    <method name="NotifyProfileApplied">
+      <arg type="s" direction="in" name="name"/>
+    </method>
     <signal name="TempChanged">
       <arg type="d" name="temp"/>
+    </signal>
+    <signal name="PlatformProfileChanged">
+      <arg type="s" name="profile"/>
+    </signal>
+    <signal name="SavedProfileChanged">
+      <arg type="s" name="name"/>
     </signal>
   </interface>
 </node>`;
@@ -47,6 +58,8 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
         this._profiles = [];
         this._activeProfile = null;
         this._tempC = proxy.CurrentTempC ?? null;
+        this._platformProfile = proxy.CurrentPlatformProfile ?? null;
+        this._savedProfile = proxy.CurrentSavedProfile || null;
 
         this.menu.setHeader('power-profile-performance-symbolic', 'strixctl');
         this._updateSubtitle();
@@ -66,13 +79,32 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
             }
         );
 
+        // Track platform profile changes from any source (GUI, CLI, etc.).
+        this._profileSignalId = this._proxy.connectSignal(
+            'PlatformProfileChanged',
+            (_proxy, _sender, [profile]) => {
+                this._platformProfile = profile;
+                this._updateSubtitle();
+            }
+        );
+
+        // Track saved profile changes — preferred over platform profile in subtitle.
+        this._savedProfileSignalId = this._proxy.connectSignal(
+            'SavedProfileChanged',
+            (_proxy, _sender, [name]) => {
+                this._savedProfile = name || null;
+                this._updateSubtitle();
+            }
+        );
+
         this._refreshProfiles();
     }
 
     _updateSubtitle() {
         const parts = [];
-        if (this._activeProfile !== null)
-            parts.push(this._activeProfile);
+        const profileLabel = this._savedProfile || this._platformProfile;
+        if (profileLabel)
+            parts.push(profileLabel);
         if (this._tempC !== null && this._tempC > 0)
             parts.push(`${this._tempC.toFixed(1)} °C`);
         this.subtitle = parts.length ? parts.join('  ·  ') : null;
@@ -150,6 +182,14 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
         if (this._tempSignalId !== undefined) {
             this._proxy.disconnectSignal(this._tempSignalId);
             this._tempSignalId = undefined;
+        }
+        if (this._profileSignalId !== undefined) {
+            this._proxy.disconnectSignal(this._profileSignalId);
+            this._profileSignalId = undefined;
+        }
+        if (this._savedProfileSignalId !== undefined) {
+            this._proxy.disconnectSignal(this._savedProfileSignalId);
+            this._savedProfileSignalId = undefined;
         }
         super.destroy();
     }
