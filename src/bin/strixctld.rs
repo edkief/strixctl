@@ -54,35 +54,7 @@ impl StrixCtlService {
     /// 800 ms for asusd to finish its transitions, then apply PPT — mirroring
     /// what the GUI does in `reload_ppt`.
     async fn apply_saved_profile(&self, name: &str) -> fdo::Result<()> {
-        let saved = profiles::load();
-        let profile = saved
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| fdo::Error::Failed(format!("profile '{name}' not found")))?
-            .clone();
-
-        let mut errors: Vec<String> = Vec::new();
-
-        // 1. Platform profile.
-        if let Err(e) = backend::apply_profile(&profile.platform_profile) {
-            errors.push(format!("platform profile: {e}"));
-        }
-
-        // 2. Fan curve — triggers asusd power-state reload.
-        let curve = FanCurve { points: profile.fan_curve.clone(), hysteresis: profile.fan_hysteresis };
-        if let Err(e) = backend::apply_fan_curve(&profile.platform_profile, &curve) {
-            errors.push(format!("fan curve: {e}"));
-        }
-
-        // 3. Wait for asusd to finish touching PPT registers before ryzenadj
-        //    writes its own values.
-        tokio::time::sleep(Duration::from_millis(800)).await;
-
-        // 4. PPT last, so asusd cannot clobber it.
-        if let Err(e) = backend::apply_ppt(&profile.ppt) {
-            errors.push(format!("PPT: {e}"));
-        }
-
+        let errors = run_apply_saved_profile(name).await;
         if errors.is_empty() {
             Ok(())
         } else {
@@ -165,6 +137,39 @@ impl StrixCtlService {
     async fn saved_profile_changed(ctxt: &SignalContext<'_>, name: &str) -> zbus::Result<()>;
 }
 
+// ── Shared apply logic ────────────────────────────────────────────────────────
+
+/// Applies a saved profile by name. Returns a list of error strings (empty on
+/// full success). Extracted so both the D-Bus method and the startup task can
+/// share the same sequencing without duplicating code.
+async fn run_apply_saved_profile(name: &str) -> Vec<String> {
+    let saved = profiles::load();
+    let profile = match saved.iter().find(|p| p.name == name) {
+        Some(p) => p.clone(),
+        None => return vec![format!("profile '{name}' not found")],
+    };
+
+    let mut errors: Vec<String> = Vec::new();
+
+    if let Err(e) = backend::apply_profile(&profile.platform_profile) {
+        errors.push(format!("platform profile: {e}"));
+    }
+
+    let curve = FanCurve { points: profile.fan_curve.clone(), hysteresis: profile.fan_hysteresis };
+    if let Err(e) = backend::apply_fan_curve(&profile.platform_profile, &curve) {
+        errors.push(format!("fan curve: {e}"));
+    }
+
+    // Wait for asusd to finish touching PPT registers before ryzenadj writes.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    if let Err(e) = backend::apply_ppt(&profile.ppt) {
+        errors.push(format!("PPT: {e}"));
+    }
+
+    errors
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -186,6 +191,19 @@ async fn main() -> zbus::Result<()> {
         .serve_at("/com/strixctl/Service", service)?
         .build()
         .await?;
+
+    // Apply the last-active saved profile on daemon startup so system settings
+    // are restored after login/reboot without needing the GUI or extension.
+    if let Some(name) = profiles::load_active() {
+        tokio::spawn(async move {
+            let errors = run_apply_saved_profile(&name).await;
+            if errors.is_empty() {
+                eprintln!("[strixctld] startup: applied profile '{name}'");
+            } else {
+                eprintln!("[strixctld] startup: apply '{}' errors: {}", name, errors.join(" | "));
+            }
+        });
+    }
 
     // Poll CPU temp every second; emit TempChanged when it shifts by > 0.5 °C.
     let conn_clone = conn.clone();

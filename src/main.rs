@@ -5,10 +5,13 @@ mod state;
 mod watcher;
 mod widgets;
 
+use std::sync::Arc;
 use std::sync::mpsc;
 
 use app::App;
 use state::AppState;
+
+const APP_ICON: &[u8] = include_bytes!("../strixctl.png");
 
 fn main() -> eframe::Result<()> {
     let (tx, rx) = mpsc::channel();
@@ -17,6 +20,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("strixctl")
+            .with_icon(Arc::new(eframe::icon_data::from_png_bytes(APP_ICON).expect("valid icon")))
             .with_inner_size([640.0, 560.0])
             .with_min_inner_size([480.0, 400.0]),
         ..Default::default()

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import GObject from 'gi://GObject';
-import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
@@ -133,19 +132,26 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
                 'No saved profiles', {reactive: false}
             );
             this.menu.addMenuItem(placeholder);
-            return;
+        } else {
+            for (const name of this._profiles) {
+                const item = new PopupMenu.PopupMenuItem(name);
+                item.setOrnament(
+                    name === this._activeProfile
+                        ? PopupMenu.Ornament.CHECK
+                        : PopupMenu.Ornament.NONE
+                );
+                item.connect('activate', () => this._applyProfile(name));
+                this.menu.addMenuItem(item);
+            }
         }
 
-        for (const name of this._profiles) {
-            const item = new PopupMenu.PopupMenuItem(name);
-            item.setOrnament(
-                name === this._activeProfile
-                    ? PopupMenu.Ornament.CHECK
-                    : PopupMenu.Ornament.NONE
-            );
-            item.connect('activate', () => this._applyProfile(name));
-            this.menu.addMenuItem(item);
-        }
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const launchItem = new PopupMenu.PopupMenuItem('Open strixctl');
+        launchItem.connect('activate', () => {
+            Shell.AppSystem.get_default().lookup_app('strixctl.desktop')?.activate();
+        });
+        this.menu.addMenuItem(launchItem);
     }
 
     _applyProfile(name) {
@@ -173,13 +179,12 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
 
     _handleClick(event) {
         const button = event.get_button();
-        if (button === 1) {
-            const app = Shell.AppSystem.get_default().lookup_app('strixctl.desktop');
-            if (app) {
-                app.launch([], null);
-            }
-        } else if (button === 3 && this._activeProfile) {
-            this._applyProfile(this._activeProfile);
+        // _activeProfile is only set when the user applies via this session's UI;
+        // fall back to _savedProfile (from D-Bus property) so right-click works
+        // correctly after a shell restart.
+        const target = this._activeProfile ?? this._savedProfile;
+        if (button === 3 && target) {
+            this._applyProfile(target);
         }
     }
 
@@ -269,43 +274,9 @@ export default class StrixCtlExtension extends Extension {
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
             () => this._indicator._toggle.cycleNext()
         );
-
-        // Reapply the active profile after a delay so system services are ready.
-        this._startupTimerId = GLib.timeout_add_seconds(
-            GLib.PRIORITY_DEFAULT, 7, () => {
-                this._reapplyActiveProfile();
-                this._startupTimerId = null;
-                return GLib.SOURCE_REMOVE;
-            }
-        );
-    }
-
-    _reapplyActiveProfile() {
-        const configPath = GLib.build_filenamev([
-            GLib.get_user_config_dir(), 'strixctl', 'active-profile',
-        ]);
-        const file = Gio.File.new_for_path(configPath);
-        file.load_contents_async(null, (_file, res) => {
-            try {
-                const [, bytes] = _file.load_contents_finish(res);
-                const name = new TextDecoder().decode(bytes).trim();
-                if (!name)
-                    return;
-                this._proxy.ApplySavedProfileRemote(name, (_result, error) => {
-                    if (error)
-                        logError(error, `strixctl: startup reapply of '${name}'`);
-                });
-            } catch (_e) {
-                // No active-profile file — nothing to reapply.
-            }
-        });
     }
 
     disable() {
-        if (this._startupTimerId !== null && this._startupTimerId !== undefined) {
-            GLib.source_remove(this._startupTimerId);
-            this._startupTimerId = null;
-        }
         Main.wm.removeKeybinding('cycle-profiles-key');
         this._indicator?.destroy();
         this._indicator = null;

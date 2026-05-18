@@ -4,4 +4,6 @@ Comment=ASUS ROG system control
 Exec=strixctl
 Icon=strixctl
 Type=Application
+SingleMainWindow=true
+StartupWMClass=strixctl
 Categories=System;Settings;
