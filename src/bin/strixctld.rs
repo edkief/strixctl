@@ -53,9 +53,26 @@ impl StrixCtlService {
     /// that ryzenadj already set.  We therefore apply the fan curve first, wait
     /// 800 ms for asusd to finish its transitions, then apply PPT — mirroring
     /// what the GUI does in `reload_ppt`.
-    async fn apply_saved_profile(&self, name: &str) -> fdo::Result<()> {
+    async fn apply_saved_profile(
+        &self,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        name: &str,
+    ) -> fdo::Result<()> {
         let errors = run_apply_saved_profile(name).await;
         if errors.is_empty() {
+            profiles::save_active(name);
+            let changed = {
+                let mut guard = self.current_saved_profile.lock().unwrap();
+                if *guard != name {
+                    *guard = name.to_string();
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                let _ = Self::saved_profile_changed(&ctxt, name).await;
+            }
             Ok(())
         } else {
             Err(fdo::Error::Failed(errors.join(" | ")))
@@ -195,10 +212,20 @@ async fn main() -> zbus::Result<()> {
     // Apply the last-active saved profile on daemon startup so system settings
     // are restored after login/reboot without needing the GUI or extension.
     if let Some(name) = profiles::load_active() {
+        let conn_startup = conn.clone();
         tokio::spawn(async move {
             let errors = run_apply_saved_profile(&name).await;
             if errors.is_empty() {
                 eprintln!("[strixctld] startup: applied profile '{name}'");
+                if let Ok(iref) = conn_startup
+                    .object_server()
+                    .interface::<_, StrixCtlService>("/com/strixctl/Service")
+                    .await
+                {
+                    let _ = StrixCtlService::saved_profile_changed(
+                        iref.signal_context(), &name,
+                    ).await;
+                }
             } else {
                 eprintln!("[strixctld] startup: apply '{}' errors: {}", name, errors.join(" | "));
             }

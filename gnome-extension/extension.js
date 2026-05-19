@@ -97,7 +97,7 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
             }
         );
 
-        this._refreshProfiles();
+        this._refreshProfiles(/* applyOnLoad= */ true);
 
         this.connect('button-press-event', (_toggle, event) => this._handleClick(event));
     }
@@ -112,7 +112,7 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
         this.subtitle = parts.length ? parts.join('  ·  ') : null;
     }
 
-    _refreshProfiles() {
+    _refreshProfiles(applyOnLoad = false) {
         this._proxy.ListSavedProfilesRemote((result, error) => {
             if (error) {
                 this._profiles = [];
@@ -120,6 +120,12 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
                 this._profiles = result[0] ?? [];
             }
             this._buildMenu();
+
+            if (applyOnLoad) {
+                const saved = this._proxy.CurrentSavedProfile;
+                if (saved)
+                    this._applyProfile(saved, /* silent= */ true);
+            }
         });
     }
 
@@ -154,7 +160,7 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
         this.menu.addMenuItem(launchItem);
     }
 
-    _applyProfile(name) {
+    _applyProfile(name, silent = false) {
         this._proxy.ApplySavedProfileRemote(name, (_result, error) => {
             if (error) {
                 // Pull the readable part out of the D-Bus error string.
@@ -168,12 +174,13 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
                 this._buildMenu();
                 return;
             }
-           this._lastError = null;
+            this._lastError = null;
             this._activeProfile = name;
             this._savedProfile = name;
             this._updateSubtitle();
             this._buildMenu();
-            _showProfileOSD(name);
+            if (!silent)
+                _showProfileOSD(name);
         });
     }
 
