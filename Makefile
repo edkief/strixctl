@@ -18,6 +18,7 @@ DBUS_USER_DIR  := $(HOME)/.local/share/dbus-1/services
 build:
 	cargo build --release
 	cargo build --release --features daemon --bin strixctld
+	cargo build --release --bin strixctl-cpuctl
 
 build-daemon:
 	cargo build --release --features daemon --bin strixctld
@@ -29,9 +30,12 @@ build-daemon:
 install-polkit:
 	$(SUDO) install -Dm644 polkit/com.strixctl.ryzenadj.policy \
 	  /usr/share/polkit-1/actions/com.strixctl.ryzenadj.policy
+	$(SUDO) install -Dm644 polkit/com.strixctl.cpuctl.policy \
+	  /usr/share/polkit-1/actions/com.strixctl.cpuctl.policy
 
 uninstall-polkit:
 	$(SUDO) rm -f /usr/share/polkit-1/actions/com.strixctl.ryzenadj.policy
+	$(SUDO) rm -f /usr/share/polkit-1/actions/com.strixctl.cpuctl.policy
 
 # ── User installs (no sudo) ───────────────────────────────────────────────
 
@@ -40,9 +44,11 @@ uninstall-polkit:
 
 install-bin:
 	$(SUDO) install -Dm755 target/release/strixctl $(PREFIX)/bin/strixctl
+	$(SUDO) install -Dm755 target/release/strixctl-cpuctl $(PREFIX)/bin/strixctl-cpuctl
 
 uninstall-bin:
 	$(SUDO) rm -f $(PREFIX)/bin/strixctl
+	$(SUDO) rm -f $(PREFIX)/bin/strixctl-cpuctl
 
 install-desktop:
 	$(SUDO) install -Dm644 strixctl.png $(PREFIX)/share/icons/hicolor/256x256/apps/strixctl.png

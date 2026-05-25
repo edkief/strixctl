@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{Profile, PptLimits};
+use crate::state::{CorePreset, Profile, PptLimits};
+
+fn default_boost() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedProfile {
@@ -12,6 +14,10 @@ pub struct SavedProfile {
     pub ppt: PptLimits,
     pub fan_curve: Vec<(f32, f32)>,
     pub fan_hysteresis: u8,
+    #[serde(default = "default_boost")]
+    pub boost_enabled: bool,
+    #[serde(default)]
+    pub core_preset: CorePreset,
 }
 
 /// Upserts `profile` into `list` by name (replaces if name already exists).

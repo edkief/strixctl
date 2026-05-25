@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use crate::state::{FanCurve, PptLimits, Profile};
+use crate::state::{CorePreset, FanCurve, PptLimits, Profile};
 
 pub fn apply_profile(profile: &Profile) -> Result<(), String> {
     run_cmd("asusctl", &["profile", "set", profile.as_str()])
@@ -136,6 +136,53 @@ fn parse_ryzenadj_value(line: &str) -> Option<u32> {
     let col = line.split('|').nth(2)?;
     let watts: f32 = col.trim().parse().ok()?;
     Some((watts * 1000.0).round() as u32)
+}
+
+/// Reads current CPU boost state from sysfs (no root required).
+pub fn read_boost() -> Option<bool> {
+    std::fs::read_to_string("/sys/devices/system/cpu/cpufreq/boost")
+        .ok()
+        .map(|s| s.trim() == "1")
+}
+
+/// Infers the active `CorePreset` by checking sentinel CPU online files.
+/// Returns `Sixteen` when the state doesn't match any known preset or files are absent.
+pub fn read_core_preset() -> CorePreset {
+    let online = |cpu: u32| -> bool {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/online");
+        std::fs::read_to_string(&path)
+            .map(|s| s.trim() == "1")
+            .unwrap_or(true) // cpu0 has no online file but is always on
+    };
+
+    // Check sentinels in order from most restrictive to most permissive.
+    if !online(4) && !online(16) {
+        CorePreset::Four
+    } else if !online(8) && !online(24) {
+        CorePreset::Eight
+    } else if !online(6) && !online(14) {
+        CorePreset::Twelve
+    } else {
+        CorePreset::Sixteen
+    }
+}
+
+/// Enables or disables CPU boost via the privileged helper.
+pub fn set_boost(enabled: bool) -> Result<(), String> {
+    run_cmd("pkexec", &[
+        "/usr/local/bin/strixctl-cpuctl",
+        "boost",
+        if enabled { "1" } else { "0" },
+    ])
+}
+
+/// Applies a core-count preset via the privileged helper.
+pub fn set_core_preset(preset: &CorePreset) -> Result<(), String> {
+    run_cmd("pkexec", &[
+        "/usr/local/bin/strixctl-cpuctl",
+        "cores",
+        &preset.as_u32().to_string(),
+    ])
 }
 
 pub fn read_current_profile() -> Option<Profile> {

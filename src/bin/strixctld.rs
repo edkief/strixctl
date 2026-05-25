@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use zbus::{connection, fdo, interface, object_server::SignalContext};
 
-use crate::state::{FanCurve, PptLimits, Profile};
+use crate::state::{CorePreset, FanCurve, PptLimits, Profile};
 
 // ── D-Bus interface ──────────────────────────────────────────────────────────
 
@@ -37,6 +37,8 @@ struct StrixCtlService {
     current_temp: Arc<Mutex<f64>>,
     current_profile: Arc<Mutex<String>>,
     current_saved_profile: Arc<Mutex<String>>,
+    boost_enabled: Arc<Mutex<bool>>,
+    core_preset: Arc<Mutex<u32>>,
 }
 
 #[interface(name = "com.strixctl.Service")]
@@ -141,6 +143,51 @@ impl StrixCtlService {
         Ok(())
     }
 
+    /// Enables or disables CPU boost.
+    async fn set_boost(
+        &self,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        enabled: bool,
+    ) -> fdo::Result<()> {
+        backend::set_boost(enabled).map_err(fdo::Error::Failed)?;
+        *self.boost_enabled.lock().unwrap() = enabled;
+        let _ = Self::boost_changed(&ctxt, enabled).await;
+        Ok(())
+    }
+
+    /// Sets the active core-count preset (4, 8, 12, or 16).
+    async fn set_core_preset(
+        &self,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        preset: u32,
+    ) -> fdo::Result<()> {
+        let cp = CorePreset::from_u32(preset);
+        backend::set_core_preset(&cp).map_err(fdo::Error::Failed)?;
+        *self.core_preset.lock().unwrap() = preset;
+        let _ = Self::core_preset_changed(&ctxt, preset).await;
+        Ok(())
+    }
+
+    /// Whether CPU boost is currently enabled.
+    #[zbus(property)]
+    fn boost_enabled(&self) -> bool {
+        *self.boost_enabled.lock().unwrap()
+    }
+
+    /// Active core-count preset as a number (4, 8, 12, or 16).
+    #[zbus(property)]
+    fn active_core_preset(&self) -> u32 {
+        *self.core_preset.lock().unwrap()
+    }
+
+    /// Emitted when CPU boost is toggled.
+    #[zbus(signal)]
+    async fn boost_changed(ctxt: &SignalContext<'_>, enabled: bool) -> zbus::Result<()>;
+
+    /// Emitted when the active core-count preset changes.
+    #[zbus(signal)]
+    async fn core_preset_changed(ctxt: &SignalContext<'_>, preset: u32) -> zbus::Result<()>;
+
     /// Emitted when the CPU temperature changes by more than 0.5 °C.
     #[zbus(signal)]
     async fn temp_changed(ctxt: &SignalContext<'_>, temp: f64) -> zbus::Result<()>;
@@ -184,6 +231,14 @@ async fn run_apply_saved_profile(name: &str) -> Vec<String> {
         errors.push(format!("PPT: {e}"));
     }
 
+    if let Err(e) = backend::set_boost(profile.boost_enabled) {
+        errors.push(format!("boost: {e}"));
+    }
+
+    if let Err(e) = backend::set_core_preset(&profile.core_preset) {
+        errors.push(format!("core preset: {e}"));
+    }
+
     errors
 }
 
@@ -196,11 +251,19 @@ async fn main() -> zbus::Result<()> {
     let current_saved_profile = Arc::new(Mutex::new(
         profiles::load_active().unwrap_or_default()
     ));
+    let boost_enabled = Arc::new(Mutex::new(
+        backend::read_boost().unwrap_or(true)
+    ));
+    let core_preset = Arc::new(Mutex::new(
+        backend::read_core_preset().as_u32()
+    ));
 
     let service = StrixCtlService {
         current_temp: current_temp.clone(),
         current_profile: current_profile.clone(),
         current_saved_profile: current_saved_profile.clone(),
+        boost_enabled: boost_enabled.clone(),
+        core_preset: core_preset.clone(),
     };
 
     let conn = connection::Builder::session()?

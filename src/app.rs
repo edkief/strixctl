@@ -6,7 +6,7 @@ use egui::{Color32, RichText, Ui};
 
 use crate::backend;
 use crate::profiles::{self, SavedProfile};
-use crate::state::{AppState, PptLimits, Profile};
+use crate::state::{AppState, CorePreset, PptLimits, Profile};
 use crate::watcher::SensorReading;
 use crate::widgets::fan_curve::FanCurveWidget;
 
@@ -46,6 +46,10 @@ impl App {
         if let Some(fc) = backend::read_fan_curve(&state.profile) {
             state.fan_curve = fc;
         }
+        if let Some(b) = backend::read_boost() {
+            state.boost_enabled = b;
+        }
+        state.core_preset = backend::read_core_preset();
         let fan_view_temp = fit_fan_view(&state.fan_curve.points);
         let ppt_apu_str = state.ppt.apu_limit.to_string();
         let ppt_fast_str = state.ppt.fast_limit.to_string();
@@ -133,6 +137,11 @@ impl eframe::App for App {
             ui.add_space(8.0);
 
             self.show_fan_curve_section(ui);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            self.show_cpu_section(ui);
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(8.0);
@@ -282,6 +291,37 @@ impl App {
         });
     }
 
+    fn show_cpu_section(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("CPU Controls").strong());
+
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.state.boost_enabled, "CPU Boost");
+            if ui.button("Apply").clicked() {
+                match backend::set_boost(self.state.boost_enabled) {
+                    Ok(_) => self.state.status_msg = format!(
+                        "Boost {}.", if self.state.boost_enabled { "enabled" } else { "disabled" }
+                    ),
+                    Err(e) => self.state.status_msg = format!("Boost error: {e}"),
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Active cores:");
+            for preset in [CorePreset::Four, CorePreset::Eight, CorePreset::Twelve, CorePreset::Sixteen] {
+                ui.radio_value(&mut self.state.core_preset, preset.clone(), preset.label());
+            }
+            if ui.button("Apply").clicked() {
+                match backend::set_core_preset(&self.state.core_preset) {
+                    Ok(_) => self.state.status_msg = format!(
+                        "Core preset set to {}.", self.state.core_preset.label()
+                    ),
+                    Err(e) => self.state.status_msg = format!("Core preset error: {e}"),
+                }
+            }
+        });
+    }
+
     fn show_profiles_section(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Saved Profiles").strong());
 
@@ -348,6 +388,8 @@ impl App {
             ppt: self.state.ppt.clone(),
             fan_curve: self.state.fan_curve.points.clone(),
             fan_hysteresis: self.state.fan_curve.hysteresis,
+            boost_enabled: self.state.boost_enabled,
+            core_preset: self.state.core_preset.clone(),
         };
         profiles::upsert(&mut self.saved_profiles, saved);
         profiles::save(&self.saved_profiles);
@@ -372,6 +414,8 @@ impl App {
         self.state.ppt = saved.ppt;
         self.state.fan_curve.points = saved.fan_curve;
         self.state.fan_curve.hysteresis = saved.fan_hysteresis;
+        self.state.boost_enabled = saved.boost_enabled;
+        self.state.core_preset = saved.core_preset;
         self.fan_view_temp = fit_fan_view(&self.state.fan_curve.points);
         self.state.status_msg = format!("Loaded '{}'.", self.selected_profile_name);
     }
@@ -388,6 +432,12 @@ impl App {
         match backend::apply_fan_curve(&self.state.profile, &self.state.fan_curve) {
             Ok(_) => {}
             Err(e) => { self.state.status_msg = format!("Fan curve error: {e}"); return; }
+        }
+        if let Err(e) = backend::set_boost(self.state.boost_enabled) {
+            self.state.status_msg = format!("Boost error: {e}"); return;
+        }
+        if let Err(e) = backend::set_core_preset(&self.state.core_preset) {
+            self.state.status_msg = format!("Core preset error: {e}"); return;
         }
         let name = self.selected_profile_name.clone();
         profiles::save_active(&name);
@@ -409,6 +459,10 @@ impl App {
             self.state.fan_curve = fc;
             self.fan_view_temp = fit_fan_view(&self.state.fan_curve.points);
         }
+        if let Some(b) = backend::read_boost() {
+            self.state.boost_enabled = b;
+        }
+        self.state.core_preset = backend::read_core_preset();
         self.state.status_msg = "Settings reloaded from system.".into();
     }
 

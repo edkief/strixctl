@@ -1,3 +1,31 @@
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub enum CorePreset {
+    Four,    // 4 physical cores / 8 threads (SMT on)
+    Eight,   // 8 physical cores / 16 threads (SMT on)
+    Twelve,  // 6 cores per CCD / 24 threads (SMT on)
+    #[default]
+    Sixteen, // all 16 physical cores / 32 threads
+}
+
+impl CorePreset {
+    pub fn as_u32(&self) -> u32 {
+        match self { Self::Four => 4, Self::Eight => 8, Self::Twelve => 12, Self::Sixteen => 16 }
+    }
+
+    pub fn from_u32(n: u32) -> Self {
+        match n { 4 => Self::Four, 8 => Self::Eight, 12 => Self::Twelve, _ => Self::Sixteen }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Four    => "4C (8T)",
+            Self::Eight   => "8C (16T)",
+            Self::Twelve  => "12C / 6 per CCD (24T)",
+            Self::Sixteen => "16C (32T)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Profile {
     Quiet,
@@ -80,6 +108,8 @@ pub struct AppState {
     pub profile: Profile,
     pub ppt: PptLimits,
     pub fan_curve: FanCurve,
+    pub boost_enabled: bool,
+    pub core_preset: CorePreset,
     pub current_temp: f32,
     pub current_gpu_temp: Option<f32>,
     pub current_power: f32,
@@ -92,6 +122,8 @@ impl Default for AppState {
             profile: Profile::default(),
             ppt: PptLimits::default(),
             fan_curve: FanCurve::default(),
+            boost_enabled: true,
+            core_preset: CorePreset::default(),
             current_temp: 0.0,
             current_gpu_temp: None,
             current_power: 0.0,

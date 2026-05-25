@@ -20,3 +20,7 @@ daemon = ["zbus", "tokio"]
 name = "strixctld"
 path = "src/bin/strixctld.rs"
 required-features = ["daemon"]
+
+[[bin]]
+name = "strixctl-cpuctl"
+path = "src/bin/strixctl_cpuctl.rs"
