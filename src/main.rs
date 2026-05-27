@@ -2,33 +2,17 @@ mod app;
 mod backend;
 mod profiles;
 mod state;
+mod theme;
+mod views;
 mod watcher;
 mod widgets;
 
-use std::sync::Arc;
-use std::sync::mpsc;
-
 use app::App;
-use state::AppState;
 
-const APP_ICON: &[u8] = include_bytes!("../strixctl.png");
-
-fn main() -> eframe::Result<()> {
-    let (tx, rx) = mpsc::channel();
-    watcher::spawn_watcher(tx);
-
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("strixctl")
-            .with_icon(Arc::new(eframe::icon_data::from_png_bytes(APP_ICON).expect("valid icon")))
-            .with_inner_size([640.0, 560.0])
-            .with_min_inner_size([480.0, 400.0]),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "strixctl",
-        options,
-        Box::new(|_cc| Ok(Box::new(App::new(AppState::default(), rx)))),
-    )
+fn main() -> iced::Result {
+    iced::application("strixctl", App::update, App::view)
+        .theme(App::theme)
+        .subscription(App::subscription)
+        .window_size((1100.0, 760.0))
+        .run_with(App::new)
 }

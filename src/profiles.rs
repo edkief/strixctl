@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::{CorePreset, Profile, PptLimits};
 
 fn default_boost() -> bool { true }
+fn default_smt() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedProfile {
@@ -16,6 +17,8 @@ pub struct SavedProfile {
     pub fan_hysteresis: u8,
     #[serde(default = "default_boost")]
     pub boost_enabled: bool,
+    #[serde(default = "default_smt")]
+    pub smt_enabled: bool,
     #[serde(default)]
     pub core_preset: CorePreset,
 }

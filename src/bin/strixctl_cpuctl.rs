@@ -6,6 +6,11 @@
 //! Usage:
 //!   strixctl-cpuctl boost <0|1>
 //!   strixctl-cpuctl cores <4|8|12|16>
+//!   strixctl-cpuctl smt   <0|1>
+//!
+//! SMT is controlled globally via /sys/devices/system/cpu/smt/control (on|off).
+//! When SMT is off, sibling threads (cpu16-31) are absent from sysfs, so
+//! `cores` skips them silently.
 //!
 //! Core topology assumed: 16 physical cores / 32 logical (SMT on), cpu0–31.
 //!   cpu0–15  = core 0–15, thread 0   (CCD0: 0–7, CCD1: 8–15)
@@ -33,6 +38,7 @@ fn main() {
     let result = match args[1].as_str() {
         "boost" => cmd_boost(&args[2]),
         "cores" => cmd_cores(&args[2]),
+        "smt"   => cmd_smt(&args[2]),
         other   => Err(format!("unknown command '{other}'")),
     };
 
@@ -84,10 +90,19 @@ fn cmd_cores(value: &str) -> Result<(), String> {
         _ => return Err(format!("cores: expected 4|8|12|16, got '{value}'")),
     }
 
+    // When SMT is disabled the kernel hides sibling threads (cpu16-31) entirely,
+    // so writing to them would error. Skip the sibling range in that case.
+    let smt_off = fs::read_to_string("/sys/devices/system/cpu/smt/control")
+        .map(|s| s.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false);
+
     let mut errors: Vec<String> = Vec::new();
     for i in 0..32u32 {
         if i == 0 {
             // cpu0 cannot be offlined; skip silently.
+            continue;
+        }
+        if smt_off && i >= 16 {
             continue;
         }
         let path = format!("/sys/devices/system/cpu/cpu{i}/online");
@@ -106,6 +121,15 @@ fn cmd_cores(value: &str) -> Result<(), String> {
     } else {
         Err(errors.join("; "))
     }
+}
+
+fn cmd_smt(value: &str) -> Result<(), String> {
+    let v = match value {
+        "0" => "off",
+        "1" => "on",
+        _ => return Err(format!("smt: expected 0 or 1, got '{value}'")),
+    };
+    write_sysfs("/sys/devices/system/cpu/smt/control", v)
 }
 
 fn write_sysfs(path: &str, value: &str) -> Result<(), String> {

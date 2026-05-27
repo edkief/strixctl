@@ -145,6 +145,17 @@ pub fn read_boost() -> Option<bool> {
         .map(|s| s.trim() == "1")
 }
 
+/// Reads current SMT state from sysfs. None when the control file is absent
+/// (e.g. CPU does not support SMT or kernel feature disabled).
+pub fn read_smt() -> Option<bool> {
+    let raw = std::fs::read_to_string("/sys/devices/system/cpu/smt/control").ok()?;
+    match raw.trim().to_lowercase().as_str() {
+        "on" => Some(true),
+        "off" | "forceoff" | "notsupported" => Some(false),
+        _ => None,
+    }
+}
+
 /// Infers the active `CorePreset` by checking sentinel CPU online files.
 /// Returns `Sixteen` when the state doesn't match any known preset or files are absent.
 pub fn read_core_preset() -> CorePreset {
@@ -172,6 +183,15 @@ pub fn set_boost(enabled: bool) -> Result<(), String> {
     run_cmd("pkexec", &[
         "/usr/local/bin/strixctl-cpuctl",
         "boost",
+        if enabled { "1" } else { "0" },
+    ])
+}
+
+/// Enables or disables SMT via the privileged helper.
+pub fn set_smt(enabled: bool) -> Result<(), String> {
+    run_cmd("pkexec", &[
+        "/usr/local/bin/strixctl-cpuctl",
+        "smt",
         if enabled { "1" } else { "0" },
     ])
 }

@@ -1,398 +1,313 @@
-use egui::{Color32, FontId, Pos2, Response, Sense, Stroke, Ui, Vec2};
+use iced::mouse;
+use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke, Text};
+use iced::{Color, Length, Point, Rectangle, Renderer, Size, Theme};
 
-const SNAP_RADIUS: f32 = 10.0;
+use crate::app::Message;
+use crate::theme;
 
-pub struct FanCurveWidget<'a> {
-    points: &'a mut Vec<(f32, f32)>,
-    current_temp: f32,
-    dragging: &'a mut Option<usize>,
-    view_temp: &'a mut (f32, f32),
-    selected: &'a mut Vec<usize>,
-    select_drag: &'a mut Option<f32>,
+const MARGIN: f32 = 36.0;
+const HIT_RADIUS: f32 = 14.0;
+
+pub struct FanCurveProgram<'a> {
+    pub points: &'a [(f32, f32)],
+    pub current_temp: f32,
+    pub view_range: (f32, f32),
 }
 
-impl<'a> FanCurveWidget<'a> {
-    pub fn new(
-        points: &'a mut Vec<(f32, f32)>,
-        current_temp: f32,
-        dragging: &'a mut Option<usize>,
-        view_temp: &'a mut (f32, f32),
-        selected: &'a mut Vec<usize>,
-        select_drag: &'a mut Option<f32>,
-    ) -> Self {
-        Self { points, current_temp, dragging, view_temp, selected, select_drag }
+pub fn view<'a>(
+    points: &'a [(f32, f32)],
+    current_temp: f32,
+    view_range: (f32, f32),
+) -> iced::Element<'a, Message> {
+    Canvas::new(FanCurveProgram {
+        points,
+        current_temp,
+        view_range,
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+impl<'a> canvas::Program<Message> for FanCurveProgram<'a> {
+    type State = DragState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        let local = cursor.position_in(bounds);
+        match event {
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(pos) = local {
+                    for (i, p) in self.points.iter().enumerate() {
+                        let sp = world_to_screen(*p, bounds.size(), self.view_range);
+                        if (sp.x - pos.x).hypot(sp.y - pos.y) < HIT_RADIUS {
+                            state.dragging = Some(i);
+                            return (canvas::event::Status::Captured, None);
+                        }
+                    }
+                }
+                (canvas::event::Status::Ignored, None)
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.dragging = None;
+                (canvas::event::Status::Ignored, None)
+            }
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let (Some(idx), Some(pos)) = (state.dragging, local) {
+                    let (t, s) = screen_to_world(pos, bounds.size(), self.view_range);
+                    return (
+                        canvas::event::Status::Captured,
+                        Some(Message::FanPointDragged(idx, t, s)),
+                    );
+                }
+                (canvas::event::Status::Ignored, None)
+            }
+            _ => (canvas::event::Status::Ignored, None),
+        }
     }
 
-    pub fn show(self, ui: &mut Ui) -> Response {
-        sanitize(self.points);
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let size = frame.size();
 
-        let desired = Vec2::new(ui.available_width(), 220.0);
-        let (response, painter) = ui.allocate_painter(desired, Sense::click_and_drag());
-        let rect = response.rect;
+        // Plot background
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            size,
+            Color {
+                r: 0.07,
+                g: 0.07,
+                b: 0.10,
+                a: 1.0,
+            },
+        );
 
-        let vt = *self.view_temp;
-        let grid_color = Color32::from_rgb(50, 50, 70);
-        let label_font = FontId::proportional(10.0);
-
-        painter.rect_filled(rect, 4.0, Color32::from_rgb(20, 20, 30));
-
-        // Vertical grid + X labels (temperature, adaptive ticks)
-        for t in nice_ticks(vt.0, vt.1, 6) {
-            let x = rect.left() + (t - vt.0) / (vt.1 - vt.0) * rect.width();
-            painter.line_segment(
-                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                Stroke::new(1.0, grid_color),
-            );
-            painter.text(
-                Pos2::new(x, rect.bottom() + 4.0),
-                egui::Align2::CENTER_TOP,
-                format!("{t:.0}°C"),
-                label_font.clone(),
-                Color32::GRAY,
-            );
+        let plot_w = size.width - MARGIN * 2.0;
+        let plot_h = size.height - MARGIN * 2.0;
+        if plot_w <= 0.0 || plot_h <= 0.0 {
+            return vec![frame.into_geometry()];
         }
 
-        // Horizontal grid + Y labels (fan speed %, fixed)
-        for s in [0u32, 25, 50, 75, 100] {
-            let y = rect.bottom() - (s as f32 / 100.0) * rect.height();
-            painter.line_segment(
-                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                Stroke::new(1.0, grid_color),
-            );
-            painter.text(
-                Pos2::new(rect.left() - 4.0, y),
-                egui::Align2::RIGHT_CENTER,
-                format!("{s}%"),
-                label_font.clone(),
-                Color32::GRAY,
-            );
-        }
-
-        let to_screen = |temp: f32, speed: f32| -> Pos2 {
-            Pos2::new(
-                rect.left() + (temp - vt.0) / (vt.1 - vt.0) * rect.width(),
-                rect.bottom() - (speed / 100.0) * rect.height(),
-            )
+        let grid = Stroke {
+            style: canvas::Style::Solid(with_alpha(theme::SURFACE1, 0.8)),
+            width: 1.0,
+            ..Stroke::default()
         };
 
-        let to_data = |pos: Pos2| -> (f32, f32) {
-            let temp = (vt.0 + (pos.x - rect.left()) / rect.width() * (vt.1 - vt.0))
-                .clamp(vt.0, vt.1);
-            let speed = ((rect.bottom() - pos.y) / rect.height() * 100.0).clamp(0.0, 100.0);
-            (temp, speed)
-        };
-
-        let nearest_point = |cursor: Pos2| -> Option<usize> {
-            self.points
-                .iter()
-                .enumerate()
-                .map(|(i, &(t, s))| (i, to_screen(t, s).distance(cursor)))
-                .filter(|(_, d)| *d < SNAP_RADIUS * 2.0)
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                .map(|(i, _)| i)
-        };
-
-        // Scroll to zoom around cursor position
-        if response.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll.abs() > 0.1 {
-                let factor = (1.0 - scroll * 0.008).clamp(0.5, 2.0);
-                let pivot = response
-                    .hover_pos()
-                    .map(|p| vt.0 + (p.x - rect.left()) / rect.width() * (vt.1 - vt.0))
-                    .unwrap_or((vt.0 + vt.1) / 2.0);
-                let new_min = (pivot - (pivot - vt.0) * factor).max(0.0);
-                let new_max = (pivot + (vt.1 - pivot) * factor).min(100.0);
-                if new_max - new_min > 5.0 {
-                    *self.view_temp = (new_min, new_max);
-                }
-            }
-        }
-
-        // Cancel selection on click over empty space
-        if response.clicked() {
-            let on_dot = response
-                .interact_pointer_pos()
-                .and_then(|c| nearest_point(c))
-                .is_some();
-            if !on_dot {
-                self.selected.clear();
-            }
-        }
-
-        let shift_held = ui.input(|i| i.modifiers.shift);
-
-        if let Some(cursor) = response.interact_pointer_pos() {
-            if response.drag_started() {
-                if shift_held {
-                    let (temp, _) = to_data(cursor);
-                    *self.select_drag = Some(temp);
-                    *self.dragging = None;
-                } else {
-                    match nearest_point(cursor) {
-                        Some(idx) => {
-                            if !self.selected.contains(&idx) {
-                                self.selected.clear();
-                            }
-                            *self.dragging = Some(idx);
-                        }
-                        None => {
-                            self.selected.clear();
-                            *self.dragging = None;
-                        }
-                    }
-                }
-            }
-
-            if response.dragged() {
-                if let Some(start_temp) = *self.select_drag {
-                    // Update rubber-band selection by temperature range
-                    let (cur_temp, _) = to_data(cursor);
-                    let (lo, hi) = if start_temp <= cur_temp {
-                        (start_temp, cur_temp)
-                    } else {
-                        (cur_temp, start_temp)
-                    };
-                    *self.selected = self.points
-                        .iter()
-                        .enumerate()
-                        .filter(|&(_, &(t, _))| t >= lo && t <= hi)
-                        .map(|(i, _)| i)
-                        .collect();
-                } else if let Some(idx) = *self.dragging {
-                    if self.selected.len() > 1 && self.selected.contains(&idx) {
-                        // Group move: both axes
-                        let drag_delta = response.drag_delta();
-                        let delta_speed = -drag_delta.y / rect.height() * 100.0;
-                        let delta_temp = drag_delta.x / rect.width() * (vt.1 - vt.0);
-                        let clamped_speed =
-                            clamp_group_delta(self.points, self.selected, delta_speed);
-                        let clamped_temp =
-                            clamp_group_temp_delta(self.points, self.selected, delta_temp, vt);
-                        for &i in self.selected.iter() {
-                            self.points[i].0 =
-                                (self.points[i].0 + clamped_temp).clamp(vt.0, vt.1);
-                            self.points[i].1 =
-                                (self.points[i].1 + clamped_speed).clamp(0.0, 100.0);
-                        }
-                    } else {
-                        // Single-point drag: move both axes with monotonic constraint
-                        self.points[idx] = {
-                            let (temp, mut speed) = to_data(cursor);
-                            if idx > 0 {
-                                let prev = self.points[idx - 1].1;
-                                if speed < prev { speed = prev; }
-                            }
-                            if idx + 1 < self.points.len() {
-                                let next = self.points[idx + 1].1;
-                                if speed > next { speed = next; }
-                            }
-                            (temp, speed)
-                        };
-                    }
-                }
-            }
-        }
-
-        if response.drag_stopped() {
-            let was_select_drag = self.select_drag.is_some();
-            *self.select_drag = None;
-            let is_group_move = self.dragging
-                .map(|idx| self.selected.len() > 1 && self.selected.contains(&idx))
-                .unwrap_or(false);
-            // Only clear selection + re-sort on a plain single-point drag.
-            // Rubber-band end and group-move end must keep the selection alive.
-            if !was_select_drag && !is_group_move {
-                self.points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-                self.selected.clear();
-            }
-            *self.dragging = None;
-        }
-
-        // Draw rubber-band selection rectangle
-        if let (Some(start_temp), Some(cursor)) =
-            (*self.select_drag, response.interact_pointer_pos())
-        {
-            let (cur_temp, _) = to_data(cursor);
-            let x1 = rect.left() + (start_temp - vt.0) / (vt.1 - vt.0) * rect.width();
-            let x2 = rect.left() + (cur_temp - vt.0) / (vt.1 - vt.0) * rect.width();
-            let sel_rect = egui::Rect::from_x_y_ranges(
-                x1.min(x2)..=x1.max(x2),
-                rect.top()..=rect.bottom(),
+        // Horizontal grid + Y labels (fan %)
+        for i in 0..=4 {
+            let y = MARGIN + plot_h * (i as f32 / 4.0);
+            frame.stroke(
+                &Path::line(Point::new(MARGIN, y), Point::new(MARGIN + plot_w, y)),
+                grid.clone(),
             );
-            painter.rect_filled(
-                sel_rect,
-                0.0,
-                Color32::from_rgba_unmultiplied(100, 160, 255, 35),
+            let pct = 100 - 25 * i;
+            frame.fill_text(Text {
+                content: format!("{pct}%"),
+                position: Point::new(6.0, y - 7.0),
+                color: theme::OVERLAY1,
+                size: 11.0.into(),
+                ..Text::default()
+            });
+        }
+        // Vertical grid + X labels (°C)
+        for i in 0..=4 {
+            let x = MARGIN + plot_w * (i as f32 / 4.0);
+            frame.stroke(
+                &Path::line(Point::new(x, MARGIN), Point::new(x, MARGIN + plot_h)),
+                grid.clone(),
             );
-            painter.rect_stroke(
-                sel_rect,
-                0.0,
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(100, 160, 255, 160)),
+            let t = self.view_range.0 + (self.view_range.1 - self.view_range.0) * (i as f32 / 4.0);
+            frame.fill_text(Text {
+                content: format!("{:.0}°C", t),
+                position: Point::new(x - 14.0, size.height - MARGIN + 6.0),
+                color: theme::OVERLAY1,
+                size: 11.0.into(),
+                ..Text::default()
+            });
+        }
+
+        // Current temp indicator
+        if self.current_temp > 0.0 {
+            let x = MARGIN + temp_to_x(self.current_temp, plot_w, self.view_range);
+            if x >= MARGIN && x <= MARGIN + plot_w {
+                frame.stroke(
+                    &Path::line(Point::new(x, MARGIN), Point::new(x, MARGIN + plot_h)),
+                    Stroke {
+                        style: canvas::Style::Solid(theme::RED),
+                        width: 2.0,
+                        ..Stroke::default()
+                    },
+                );
+                frame.fill_text(Text {
+                    content: format!("{:.1}°C", self.current_temp),
+                    position: Point::new(x + 4.0, MARGIN + 4.0),
+                    color: theme::RED,
+                    size: 11.0.into(),
+                    ..Text::default()
+                });
+            }
+        }
+
+        // Curve line
+        if self.points.len() >= 2 {
+            let path = Path::new(|b| {
+                let p0 = world_to_screen(self.points[0], size, self.view_range);
+                b.move_to(p0);
+                for &p in &self.points[1..] {
+                    b.line_to(world_to_screen(p, size, self.view_range));
+                }
+            });
+            frame.stroke(
+                &path,
+                Stroke {
+                    style: canvas::Style::Solid(theme::BLUE),
+                    width: 2.5,
+                    ..Stroke::default()
+                },
             );
         }
 
-        // Connecting curve
-        let screen_pts: Vec<Pos2> =
-            self.points.iter().map(|&(t, s)| to_screen(t, s)).collect();
-        for w in screen_pts.windows(2) {
-            painter.line_segment([w[0], w[1]], Stroke::new(2.0, Color32::from_rgb(100, 200, 255)));
-        }
-
-        // Control points
-        for (i, &(t, s)) in self.points.iter().enumerate() {
-            let pos = to_screen(t, s);
-            let is_selected = self.selected.contains(&i);
-            let active = *self.dragging == Some(i);
-            let color = if active {
-                Color32::WHITE
-            } else if is_selected {
-                Color32::from_rgb(255, 210, 60)
-            } else {
-                Color32::from_rgb(100, 200, 255)
-            };
-            let r = if active { 8.0 } else if is_selected { 7.0 } else { 6.0 };
-            painter.circle_filled(pos, r, color);
-            painter.circle_stroke(pos, r, Stroke::new(1.5, Color32::WHITE));
-        }
-
-        // Value label for the dragged point, or the nearest hovered point
-        let label_idx = self.dragging.or_else(|| {
-            response.hover_pos().and_then(|cursor| {
+        // Identify hovered/dragged point so we can highlight it and show a tooltip.
+        let highlight = state.dragging.or_else(|| {
+            cursor.position_in(bounds).and_then(|pos| {
                 self.points
                     .iter()
                     .enumerate()
-                    .map(|(i, &(t, s))| (i, to_screen(t, s).distance(cursor)))
-                    .filter(|(_, d)| *d < SNAP_RADIUS * 3.0)
-                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                    .filter_map(|(i, &p)| {
+                        let sp = world_to_screen(p, size, self.view_range);
+                        let d = (sp.x - pos.x).hypot(sp.y - pos.y);
+                        if d < HIT_RADIUS { Some((i, d)) } else { None }
+                    })
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(i, _)| i)
             })
         });
-        if let Some(idx) = label_idx {
-            let (t, s) = self.points[idx];
-            let pos = to_screen(t, s);
-            painter.text(
-                pos + Vec2::new(10.0, -10.0),
-                egui::Align2::LEFT_BOTTOM,
-                format!("{t:.0}°C  {s:.0}%"),
-                FontId::proportional(11.0),
-                Color32::WHITE,
+
+        // Points
+        for (i, &p) in self.points.iter().enumerate() {
+            let sp = world_to_screen(p, size, self.view_range);
+            let active = Some(i) == highlight;
+            let radius = if active { 7.5 } else { 6.0 };
+            frame.fill(&Path::circle(sp, radius), theme::TEXT);
+            frame.stroke(
+                &Path::circle(sp, radius),
+                Stroke {
+                    style: canvas::Style::Solid(if active { theme::MAUVE } else { theme::BLUE }),
+                    width: 2.0,
+                    ..Stroke::default()
+                },
             );
         }
 
-        // Live temp indicator
-        if self.current_temp > vt.0 && self.current_temp < vt.1 {
-            let x = rect.left() + (self.current_temp - vt.0) / (vt.1 - vt.0) * rect.width();
-            painter.line_segment(
-                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                Stroke::new(1.5, Color32::from_rgb(255, 80, 80)),
-            );
-            painter.text(
-                Pos2::new(x + 3.0, rect.top() + 4.0),
-                egui::Align2::LEFT_TOP,
-                format!("{:.0}°C", self.current_temp),
-                FontId::proportional(10.0),
-                Color32::from_rgb(255, 120, 120),
-            );
+        // Hover/drag tooltip
+        if let Some(i) = highlight {
+            let p = self.points[i];
+            let sp = world_to_screen(p, size, self.view_range);
+            draw_tooltip(&mut frame, sp, p, size);
         }
 
-        painter.rect_stroke(rect, 4.0, Stroke::new(1.0, Color32::from_rgb(70, 70, 90)));
-
-        response
+        vec![frame.into_geometry()]
     }
-}
 
-/// Sorts points by temperature and enforces monotonically non-decreasing fan speed.
-/// Any point whose speed is below its predecessor's speed is snapped up to match it.
-pub fn sanitize(points: &mut Vec<(f32, f32)>) {
-    points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    for i in 1..points.len() {
-        let prev_speed = points[i - 1].1;
-        if points[i].1 < prev_speed {
-            points[i].1 = prev_speed;
+    fn mouse_interaction(
+        &self,
+        state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if state.dragging.is_some() {
+            return mouse::Interaction::Grabbing;
         }
+        if let Some(pos) = cursor.position_in(bounds) {
+            for &p in self.points {
+                let sp = world_to_screen(p, bounds.size(), self.view_range);
+                if (sp.x - pos.x).hypot(sp.y - pos.y) < HIT_RADIUS {
+                    return mouse::Interaction::Grab;
+                }
+            }
+        }
+        mouse::Interaction::default()
     }
 }
 
-/// Clamps a group temperature delta so all selected points stay within the view range
-/// and do not cross their non-selected boundary neighbours.
-fn clamp_group_temp_delta(
-    points: &[(f32, f32)],
-    selected: &[usize],
-    delta: f32,
-    vt: (f32, f32),
-) -> f32 {
-    if selected.is_empty() {
-        return delta;
-    }
-    let mut lo = -f32::INFINITY;
-    let mut hi = f32::INFINITY;
-
-    for &i in selected {
-        lo = lo.max(vt.0 - points[i].0);
-        hi = hi.min(vt.1 - points[i].0);
-    }
-
-    let min_sel = *selected.iter().min().unwrap();
-    let max_sel = *selected.iter().max().unwrap();
-
-    if min_sel > 0 {
-        lo = lo.max(points[min_sel - 1].0 - points[min_sel].0);
-    }
-    if max_sel + 1 < points.len() {
-        hi = hi.min(points[max_sel + 1].0 - points[max_sel].0);
-    }
-
-    if lo > hi { 0.0 } else { delta.clamp(lo, hi) }
+#[derive(Default)]
+pub struct DragState {
+    dragging: Option<usize>,
 }
 
-/// Clamps a group speed delta so all selected points stay in [0, 100] and respect
-/// their non-selected boundary neighbours (monotonic constraint).
-fn clamp_group_delta(points: &[(f32, f32)], selected: &[usize], delta: f32) -> f32 {
-    if selected.is_empty() {
-        return delta;
-    }
-    let mut lo = -f32::INFINITY;
-    let mut hi = f32::INFINITY;
-
-    for &i in selected {
-        lo = lo.max(-points[i].1);           // speed + delta >= 0
-        hi = hi.min(100.0 - points[i].1);    // speed + delta <= 100
-    }
-
-    let min_sel = *selected.iter().min().unwrap();
-    let max_sel = *selected.iter().max().unwrap();
-
-    if min_sel > 0 {
-        // leftmost selected must stay >= its left neighbour
-        lo = lo.max(points[min_sel - 1].1 - points[min_sel].1);
-    }
-    if max_sel + 1 < points.len() {
-        // rightmost selected must stay <= its right neighbour
-        hi = hi.min(points[max_sel + 1].1 - points[max_sel].1);
-    }
-
-    if lo > hi { 0.0 } else { delta.clamp(lo, hi) }
+fn world_to_screen(p: (f32, f32), size: Size, view: (f32, f32)) -> Point {
+    let plot_w = size.width - MARGIN * 2.0;
+    let plot_h = size.height - MARGIN * 2.0;
+    let x = MARGIN + temp_to_x(p.0, plot_w, view);
+    let y = MARGIN + plot_h * (1.0 - (p.1 / 100.0).clamp(0.0, 1.0));
+    Point::new(x, y)
 }
 
-/// Returns nicely-rounded tick values for a given range.
-fn nice_ticks(min: f32, max: f32, target_count: usize) -> Vec<f32> {
-    let range = (max - min).abs();
-    if range < 1e-6 {
-        return vec![];
+fn screen_to_world(p: Point, size: Size, view: (f32, f32)) -> (f32, f32) {
+    let plot_w = size.width - MARGIN * 2.0;
+    let plot_h = size.height - MARGIN * 2.0;
+    let tx = ((p.x - MARGIN) / plot_w).clamp(0.0, 1.0);
+    let ty = ((p.y - MARGIN) / plot_h).clamp(0.0, 1.0);
+    let temp = view.0 + (view.1 - view.0) * tx;
+    let speed = (1.0 - ty) * 100.0;
+    (temp, speed)
+}
+
+fn temp_to_x(temp: f32, plot_w: f32, view: (f32, f32)) -> f32 {
+    let span = (view.1 - view.0).max(0.001);
+    ((temp - view.0) / span) * plot_w
+}
+
+fn with_alpha(c: Color, a: f32) -> Color {
+    Color { a, ..c }
+}
+
+fn draw_tooltip(frame: &mut Frame, anchor: Point, value: (f32, f32), canvas_size: Size) {
+    let label = format!("{:.0}°C   {:.0}%", value.0, value.1);
+    // Approximate text width (size 12 → ~7px per char).
+    let w = (label.chars().count() as f32) * 7.0 + 16.0;
+    let h = 22.0;
+
+    // Prefer placing the tooltip above-right of the point; flip when near edges.
+    let mut x = anchor.x + 12.0;
+    let mut y = anchor.y - h - 10.0;
+    if x + w > canvas_size.width - 4.0 {
+        x = anchor.x - w - 12.0;
     }
-    let raw_step = range / target_count as f32;
-    let magnitude = 10f32.powf(raw_step.log10().floor());
-    let step = [1.0f32, 2.0, 5.0, 10.0]
-        .iter()
-        .map(|&s| s * magnitude)
-        .find(|&s| s >= raw_step)
-        .unwrap_or(10.0 * magnitude);
-    let mut ticks = Vec::new();
-    let mut t = (min / step).ceil() * step;
-    while t <= max + step * 0.01 {
-        ticks.push(t);
-        t += step;
+    if y < 4.0 {
+        y = anchor.y + 12.0;
     }
-    ticks
+
+    let bg = Color { r: 0.11, g: 0.11, b: 0.17, a: 0.95 };
+    frame.fill_rectangle(Point::new(x, y), Size::new(w, h), bg);
+    // Outline
+    let outline = Path::rectangle(Point::new(x, y), Size::new(w, h));
+    frame.stroke(
+        &outline,
+        Stroke {
+            style: canvas::Style::Solid(theme::MAUVE),
+            width: 1.0,
+            ..Stroke::default()
+        },
+    );
+    frame.fill_text(Text {
+        content: label,
+        position: Point::new(x + 8.0, y + 5.0),
+        color: theme::TEXT,
+        size: 12.0.into(),
+        ..Text::default()
+    });
 }

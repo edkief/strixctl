@@ -1,20 +1,15 @@
 use std::fs;
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 pub struct SensorReading {
     pub temp_c: f32,
     pub gpu_temp_c: Option<f32>,
 }
 
-pub fn spawn_watcher(tx: mpsc::Sender<SensorReading>) {
-    thread::spawn(move || loop {
-        if let Some(temp_c) = read_cpu_temp() {
-            let _ = tx.send(SensorReading { temp_c, gpu_temp_c: read_gpu_edge_temp() });
-        }
-        thread::sleep(Duration::from_secs(1));
-    });
+pub fn read_now() -> SensorReading {
+    SensorReading {
+        temp_c: read_cpu_temp().unwrap_or(0.0),
+        gpu_temp_c: read_gpu_edge_temp(),
+    }
 }
 
 fn read_cpu_temp() -> Option<f32> {
@@ -49,7 +44,6 @@ fn read_gpu_edge_temp() -> Option<f32> {
         if name.trim() != "amdgpu" {
             continue;
         }
-        // Find the temp input whose label is "edge"
         for idx in 1..=10u8 {
             let label = fs::read_to_string(format!("{base}/temp{idx}_label")).unwrap_or_default();
             if label.trim() == "edge" {
