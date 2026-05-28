@@ -24,7 +24,7 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Profile => "Power",
             Tab::Cooling => "Cooling",
-            Tab::Saved => "Saved",
+            Tab::Saved => "Profiles",
         }
     }
 
@@ -704,7 +704,10 @@ where
 fn apply_full_profile(saved: SavedProfile) -> Result<String, String> {
     let profile = saved.platform_profile.clone();
     backend::apply_profile(&profile)?;
-    backend::apply_ppt(&saved.ppt)?;
+    // Apply the fan curve before PPT: `asusctl fan-curve --enable-fan-curves
+    // true` makes asusd reload its internal power state, which overwrites any
+    // PPT registers ryzenadj set. Wait for asusd to settle, then write PPT —
+    // mirroring the daemon's `run_apply_saved_profile`.
     backend::apply_fan_curve(
         &profile,
         &crate::state::FanCurve {
@@ -712,6 +715,8 @@ fn apply_full_profile(saved: SavedProfile) -> Result<String, String> {
             hysteresis: saved.fan_hysteresis,
         },
     )?;
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    backend::apply_ppt(&saved.ppt)?;
     backend::set_boost(saved.boost_enabled)?;
     // SMT must be applied before the core preset, so the sibling-thread
     // sysfs entries exist (or don't) when `cores` writes to them.
