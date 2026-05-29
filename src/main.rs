@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod platform;
 mod profiles;
 mod state;
 mod theme;

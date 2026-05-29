@@ -4,6 +4,7 @@ use iced::widget::{button, column, container, row, text, Space};
 use iced::{Alignment, Element, Length, Subscription, Task, Theme};
 
 use crate::backend;
+use crate::platform;
 use crate::profiles::{self, SavedProfile};
 use crate::state::{AppState, CorePreset, PptLimits, Profile};
 use crate::theme;
@@ -29,6 +30,15 @@ impl Tab {
     }
 
     pub const ALL: [Tab; 4] = [Tab::Overview, Tab::Profile, Tab::Cooling, Tab::Saved];
+
+    /// Tabs to show on the current platform — hides Cooling (fan curves) where
+    /// asusctl isn't available.
+    pub fn visible() -> Vec<Tab> {
+        Tab::ALL
+            .into_iter()
+            .filter(|t| *t != Tab::Cooling || platform::SUPPORTS_FAN_CURVE)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -105,8 +115,12 @@ impl App {
         if let Some(p) = backend::read_current_profile() {
             state.profile = p;
         }
-        if let Some(ppt) = backend::read_current_ppt() {
-            state.ppt = ppt;
+        // Reading current PPT needs elevation; skip the automatic read where that
+        // would raise a UAC prompt at launch (Windows) — see platform::AUTO_READ_PPT.
+        if platform::AUTO_READ_PPT {
+            if let Some(ppt) = backend::read_current_ppt() {
+                state.ppt = ppt;
+            }
         }
         if let Some(fc) = backend::read_fan_curve(&state.profile) {
             state.fan_curve = fc;
@@ -118,6 +132,7 @@ impl App {
             state.smt_enabled = s;
         }
         state.core_preset = backend::read_core_preset();
+        state.core_reboot_pending = backend::core_reboot_pending();
 
         let fan_view_temp = fit_fan_view(&state.fan_curve.points);
         let ppt_apu_str = state.ppt.apu_limit.to_string();
@@ -201,6 +216,7 @@ impl App {
                     self.state.smt_enabled = s;
                 }
                 self.state.core_preset = backend::read_core_preset();
+                self.state.core_reboot_pending = backend::core_reboot_pending();
                 self.set_status("Settings reloaded from system.");
                 Task::none()
             }
@@ -424,7 +440,12 @@ impl App {
                 )
             }
             Message::CorePresetApplied(Ok(p)) => {
-                self.set_status(&format!("Core preset set to {}.", p.label()));
+                self.state.core_reboot_pending = backend::core_reboot_pending();
+                if self.state.core_reboot_pending {
+                    self.set_status(&format!("Core preset set to {} — restart to apply.", p.label()));
+                } else {
+                    self.set_status(&format!("Core preset set to {}.", p.label()));
+                }
                 Task::none()
             }
             Message::CorePresetApplied(Err(e)) => {
@@ -603,7 +624,7 @@ impl App {
 
     fn tab_strip(&self) -> Element<'_, Message> {
         let mut r = row![].spacing(4).padding([0, 16]);
-        for t in Tab::ALL {
+        for t in Tab::visible() {
             let selected = self.tab == t;
             r = r.push(
                 button(text(t.label()).size(14))
@@ -725,6 +746,9 @@ fn apply_full_profile(saved: SavedProfile) -> Result<String, String> {
     Ok(saved.name)
 }
 
+/// Notifies the strixctld daemon (D-Bus) that a saved profile was applied. The
+/// daemon is Linux-only, so this is a no-op on other platforms.
+#[cfg(unix)]
 fn notify_daemon_profile_applied(name: &str) {
     let _ = std::process::Command::new("gdbus")
         .args([
@@ -740,6 +764,9 @@ fn notify_daemon_profile_applied(name: &str) {
         ])
         .spawn();
 }
+
+#[cfg(not(unix))]
+fn notify_daemon_profile_applied(_name: &str) {}
 
 pub fn fit_fan_view(points: &[(f32, f32)]) -> (f32, f32) {
     if points.is_empty() {

@@ -24,9 +24,20 @@
 //!
 //! cpu0 is always online (kernel ignores writes to /sys/.../cpu0/online).
 
-use std::fs;
 use std::process;
+#[cfg(unix)]
+use std::fs;
 
+// This privileged helper drives Linux sysfs directly and is unix-only. On other
+// platforms it builds as a stub so `cargo build` over the whole package succeeds;
+// it is never installed or invoked there.
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("strixctl-cpuctl is only supported on Linux.");
+    process::exit(1);
+}
+
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -48,6 +59,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn cmd_boost(value: &str) -> Result<(), String> {
     let v = match value {
         "0" => "0",
@@ -57,6 +69,7 @@ fn cmd_boost(value: &str) -> Result<(), String> {
     write_sysfs("/sys/devices/system/cpu/cpufreq/boost", v)
 }
 
+#[cfg(unix)]
 fn cmd_cores(value: &str) -> Result<(), String> {
     let preset: u32 = value.parse()
         .map_err(|_| format!("cores: expected 4|8|12|16, got '{value}'"))?;
@@ -123,6 +136,7 @@ fn cmd_cores(value: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(unix)]
 fn cmd_smt(value: &str) -> Result<(), String> {
     let v = match value {
         "0" => "off",
@@ -132,6 +146,7 @@ fn cmd_smt(value: &str) -> Result<(), String> {
     write_sysfs("/sys/devices/system/cpu/smt/control", v)
 }
 
+#[cfg(unix)]
 fn write_sysfs(path: &str, value: &str) -> Result<(), String> {
     fs::write(path, value).map_err(|e| format!("write {path}: {e}"))
 }

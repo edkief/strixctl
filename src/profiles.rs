@@ -67,11 +67,22 @@ pub fn load_active() -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-fn config_dir() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
-        });
-    base.join("strixctl")
+pub(crate) fn config_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let base = std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        base.join("strixctl")
+    }
+
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
+            });
+        base.join("strixctl")
+    }
 }

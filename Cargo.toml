@@ -9,7 +9,20 @@ iced = { version = "0.13", features = ["canvas", "tokio", "advanced", "image"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Linux-only D-Bus daemon stack (opt-in via the `daemon` feature). Not pulled in
+# on Windows, which never enables this feature.
+[target.'cfg(unix)'.dependencies]
 zbus = { version = "4", features = ["tokio"], optional = true }
+
+# Windows: UAC elevation ("runas") for ryzenadj.exe and bcdedit via ShellExecuteEx.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_Shell",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_Foundation",
+] }
 
 [features]
 daemon = ["zbus"]

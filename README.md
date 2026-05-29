@@ -21,6 +21,40 @@ A power management GUI and D-Bus daemon for the ASUS ProArt PX13 (AMD Strix Halo
 | `pkexec` (polkit) | Privilege escalation for `ryzenadj` |
 | GNOME Shell 46–50 | Optional — for the Quick Settings extension |
 
+## Windows
+
+The GUI also runs on Windows, where it supports the subset of features that have
+a real Windows path:
+
+| Feature | Windows support |
+|---------|-----------------|
+| AMD PPT tuning (STAPM / fast / slow) | ✅ via `ryzenadj.exe` |
+| Active core count | ✅ via `bcdedit /set {current} numproc` — **requires a reboot** |
+| Platform profiles, fan curves | ❌ no Windows equivalent (asusctl is Linux-only) — hidden in the UI |
+| CPU boost / SMT toggles, temperatures | ❌ no sysfs on Windows — hidden in the UI |
+| Daemon, GNOME extension | ❌ Linux-only |
+
+### Setup
+
+1. Build the GUI: `cargo build --release --bin strixctl` (do **not** pass
+   `--features daemon` — the D-Bus daemon is Linux-only).
+2. Obtain [`ryzenadj`](https://github.com/FlyGoat/RyzenAdj) for Windows and place
+   `ryzenadj.exe` together with its **WinRing0 driver** (`WinRing0x64.dll` and
+   `WinRing0x64.sys`) **next to `strixctl.exe`**. strixctl resolves ryzenadj
+   relative to its own executable (override with the `STRIXCTL_RYZENADJ`
+   environment variable). The WinRing0 driver has redistribution restrictions, so
+   it is not bundled in this repo — download it yourself.
+3. Run `strixctl.exe`. It starts unprivileged; each PPT or core-count change
+   raises a **UAC prompt** (ryzenadj and bcdedit both require Administrator).
+
+### Notes
+
+- Core-count changes use `bcdedit numproc`, which only takes effect after a
+  **reboot**. The UI shows a "restart to apply" banner until you reboot.
+- Profiles are stored in `%APPDATA%\strixctl\profiles.json`.
+- Reading current PPT values (`ryzenadj --info`) also needs elevation, so it only
+  happens when you click **Reload**, never automatically at startup.
+
 ## Architecture
 
 ```

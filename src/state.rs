@@ -111,6 +111,9 @@ pub struct AppState {
     pub boost_enabled: bool,
     pub smt_enabled: bool,
     pub core_preset: CorePreset,
+    /// True when a core-count change has been applied but needs a reboot to take
+    /// effect (Windows `bcdedit numproc`). Always false on Linux.
+    pub core_reboot_pending: bool,
     pub current_temp: f32,
     pub current_gpu_temp: Option<f32>,
     pub current_power: f32,
@@ -126,6 +129,7 @@ impl Default for AppState {
             boost_enabled: true,
             smt_enabled: true,
             core_preset: CorePreset::default(),
+            core_reboot_pending: false,
             current_temp: 0.0,
             current_gpu_temp: None,
             current_power: 0.0,

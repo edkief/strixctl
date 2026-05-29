@@ -18,7 +18,7 @@
 
 #[path = "../state.rs"]
 mod state;
-#[path = "../backend.rs"]
+#[path = "../backend/mod.rs"]
 mod backend;
 #[path = "../profiles.rs"]
 mod profiles;

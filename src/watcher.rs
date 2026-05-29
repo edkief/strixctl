@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::fs;
 
 pub struct SensorReading {
@@ -6,12 +7,26 @@ pub struct SensorReading {
 }
 
 pub fn read_now() -> SensorReading {
-    SensorReading {
-        temp_c: read_cpu_temp().unwrap_or(0.0),
-        gpu_temp_c: read_gpu_edge_temp(),
+    #[cfg(unix)]
+    {
+        SensorReading {
+            temp_c: read_cpu_temp().unwrap_or(0.0),
+            gpu_temp_c: read_gpu_edge_temp(),
+        }
+    }
+
+    // No sysfs temperature source on non-Linux platforms; the GUI hides temp UI
+    // there (see `platform::SUPPORTS_TEMP`).
+    #[cfg(not(unix))]
+    {
+        SensorReading {
+            temp_c: 0.0,
+            gpu_temp_c: None,
+        }
     }
 }
 
+#[cfg(unix)]
 fn read_cpu_temp() -> Option<f32> {
     // Prefer k10temp Tctl (hwmon), which is the AMD CPU die temperature
     for hwmon in 0..20u8 {
@@ -37,6 +52,7 @@ fn read_cpu_temp() -> Option<f32> {
     parse_temp_file("/sys/class/thermal/thermal_zone0/temp")
 }
 
+#[cfg(unix)]
 fn read_gpu_edge_temp() -> Option<f32> {
     for hwmon in 0..20u8 {
         let base = format!("/sys/class/hwmon/hwmon{hwmon}");
@@ -54,6 +70,7 @@ fn read_gpu_edge_temp() -> Option<f32> {
     None
 }
 
+#[cfg(unix)]
 fn parse_temp_file(path: &str) -> Option<f32> {
     let raw = fs::read_to_string(path).ok()?;
     let millideg: f32 = raw.trim().parse().ok()?;
