@@ -16,8 +16,9 @@
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::profiles::SavedProfile;
 use crate::state::{CorePreset, FanCurve, PptLimits, Profile};
 
 // ---------- Supported features ----------
@@ -197,6 +198,93 @@ fn format_curve(curve: &FanCurve) -> Result<String, String> {
         .join(","))
 }
 
+// ---------- Batched apply (single UAC prompt) ----------
+
+/// Applies a whole saved profile (plan + fan curve + PPT + core preset) in one
+/// elevated batch script, so the user sees a single UAC prompt instead of one
+/// per tool. Each step gets a distinct exit code so a failure can be named.
+///
+/// Boost and SMT have no Windows equivalent and are skipped. The core-preset
+/// step still only takes effect after a reboot (tracked via `write_pending_cores`).
+pub fn apply_saved(saved: &SavedProfile) -> Result<(), String> {
+    let atrofac = atrofac_path();
+    let ryzenadj = super::ryzenadj_path();
+
+    let curve = format_curve(&FanCurve {
+        points: saved.fan_curve.clone(),
+        hysteresis: saved.fan_hysteresis,
+    })?;
+    // In a .bat, `%` starts variable expansion — double it so atrofac receives
+    // a literal `%` (cmd collapses `%%` back to `%`).
+    let curve = curve.replace('%', "%%");
+    let plan = profile_plan(&saved.platform_profile);
+    let ppt = &saved.ppt;
+
+    let dir = std::env::temp_dir();
+    let bat = dir.join("strixctl_apply.bat");
+    let log = dir.join("strixctl_apply.log");
+    let _ = std::fs::remove_file(&log);
+
+    // `/set` is fatal on failure; `/deletevalue` ("all cores") is best-effort,
+    // since deleting an unset value errors harmlessly.
+    let bcd_line = match preset_numproc(&saved.core_preset) {
+        Some(n) => format!(
+            "bcdedit /set {{current}} numproc {n} >> \"{log}\" 2>&1 || exit /b 3",
+            log = log.display()
+        ),
+        None => format!(
+            "bcdedit /deletevalue {{current}} numproc >> \"{log}\" 2>&1",
+            log = log.display()
+        ),
+    };
+
+    let script = format!(
+        "@echo off\r\n\
+         \"{atro}\" fan --plan {plan} --cpu {curve} --gpu {curve} >> \"{log}\" 2>&1 || exit /b 1\r\n\
+         \"{ryz}\" --stapm-limit={apu} --fast-limit={fast} --slow-limit={slow} --apu-slow-limit={apu} >> \"{log}\" 2>&1 || exit /b 2\r\n\
+         {bcd}\r\n",
+        atro = atrofac.display(),
+        ryz = ryzenadj.display(),
+        log = log.display(),
+        apu = ppt.apu_limit,
+        fast = ppt.fast_limit,
+        slow = ppt.slow_limit,
+        bcd = bcd_line,
+    );
+    std::fs::write(&bat, script).map_err(|e| format!("write batch file: {e}"))?;
+
+    let code = run_elevated_code(OsStr::new("cmd.exe"), &format!("/c \"{}\"", bat.display()));
+    let _ = std::fs::remove_file(&bat);
+    let code = code?; // propagate elevation/launch failure (e.g. UAC declined)
+
+    let result = match code {
+        0 => {
+            // All steps ran, including bcdedit — the core change is now pending.
+            write_pending_cores(saved.core_preset.as_u32());
+            Ok(())
+        }
+        1 => Err(step_error("power plan / fan curve (atrofac)", &log)),
+        2 => Err(step_error("power limits (ryzenadj)", &log)),
+        3 => Err(step_error("core preset (bcdedit)", &log)),
+        c => Err(format!("apply failed (exit code {c})")),
+    };
+    let _ = std::fs::remove_file(&log);
+    result
+}
+
+/// Builds an error message for a failed batch step, appending the last line of
+/// the captured log when available.
+fn step_error(step: &str, log: &Path) -> String {
+    let detail = std::fs::read_to_string(log)
+        .ok()
+        .and_then(|s| s.trim().lines().last().map(str::to_string))
+        .filter(|s| !s.is_empty());
+    match detail {
+        Some(d) => format!("{step} failed: {d}"),
+        None => format!("{step} failed"),
+    }
+}
+
 // ---------- Unsupported on Windows (no-op stubs) ----------
 
 pub fn read_boost() -> Option<bool> {
@@ -221,6 +309,15 @@ fn to_wide(s: &OsStr) -> Vec<u16> {
 /// Runs `program` with the argument string `args` elevated via UAC ("runas"),
 /// waits for it to exit, and returns Ok(()) on exit code 0.
 fn run_elevated(program: &OsStr, args: &str) -> Result<(), String> {
+    match run_elevated_code(program, args)? {
+        0 => Ok(()),
+        code => Err(format!("process exited with code {code}")),
+    }
+}
+
+/// Like `run_elevated`, but returns the raw process exit code so callers can
+/// distinguish between failing steps (used by the batched `apply_saved`).
+fn run_elevated_code(program: &OsStr, args: &str) -> Result<u32, String> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, WaitForSingleObject, INFINITE,
@@ -257,10 +354,6 @@ fn run_elevated(program: &OsStr, args: &str) -> Result<(), String> {
         if got == 0 {
             return Err("could not read process exit code".to_string());
         }
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(format!("process exited with code {code}"))
-        }
+        Ok(code)
     }
 }

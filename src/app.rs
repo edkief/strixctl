@@ -722,6 +722,7 @@ where
     )
 }
 
+#[cfg(not(windows))]
 fn apply_full_profile(saved: SavedProfile) -> Result<String, String> {
     let profile = saved.platform_profile.clone();
     backend::apply_profile(&profile)?;
@@ -743,6 +744,14 @@ fn apply_full_profile(saved: SavedProfile) -> Result<String, String> {
     // sysfs entries exist (or don't) when `cores` writes to them.
     backend::set_smt(saved.smt_enabled)?;
     backend::set_core_preset(&saved.core_preset)?;
+    Ok(saved.name)
+}
+
+// On Windows every privileged step (atrofac, ryzenadj, bcdedit) would raise its
+// own UAC prompt, so batch them into a single elevated script — one prompt.
+#[cfg(windows)]
+fn apply_full_profile(saved: SavedProfile) -> Result<String, String> {
+    backend::apply_saved(&saved)?;
     Ok(saved.name)
 }
 
