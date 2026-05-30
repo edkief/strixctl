@@ -135,20 +135,70 @@ fn clear_pending_cores() {
     let _ = std::fs::remove_file(pending_path());
 }
 
-// ---------- Unsupported on Windows (no-op stubs) ----------
+// ---------- Power plan & fan curve via atrofac-cli ----------
+//
+// atrofac drives the ASUS Armoury Crate WMI interface. Its `fan` command sets a
+// power plan *and* the fan curve together; `plan` sets the plan only. Both need
+// Administrator (no kernel driver) and atrofac cannot read state back.
 
-pub fn apply_profile(_profile: &Profile) -> Result<(), String> {
-    Ok(())
+/// Sets the atrofac power plan (keeping ASUS's default fan curve).
+pub fn apply_profile(profile: &Profile) -> Result<(), String> {
+    let atrofac = atrofac_path();
+    run_elevated(atrofac.as_os_str(), &format!("plan {}", profile_plan(profile)))
 }
-pub fn apply_fan_curve(_profile: &Profile, _curve: &FanCurve) -> Result<(), String> {
-    Ok(())
+
+/// Sets the fan curve (applied to both CPU and GPU fans) together with the plan
+/// that maps to `profile`, since atrofac's `fan` command always sets both.
+pub fn apply_fan_curve(profile: &Profile, curve: &FanCurve) -> Result<(), String> {
+    let atrofac = atrofac_path();
+    let c = format_curve(curve)?;
+    let args = format!("fan --plan {} --cpu {c} --gpu {c}", profile_plan(profile));
+    run_elevated(atrofac.as_os_str(), &args)
 }
+
+/// atrofac is set-only — it cannot read the current curve back.
 pub fn read_fan_curve(_profile: &Profile) -> Option<FanCurve> {
     None
 }
+
+/// atrofac cannot read the current plan back.
 pub fn read_current_profile() -> Option<Profile> {
     None
 }
+
+fn atrofac_path() -> PathBuf {
+    super::resolve_tool("STRIXCTL_ATROFAC", "atrofac-cli.exe", "atrofac-cli")
+}
+
+/// Maps a strixctl profile to an atrofac power plan.
+fn profile_plan(profile: &Profile) -> &'static str {
+    match profile {
+        Profile::Quiet => "silent",
+        Profile::Balanced => "windows",
+        Profile::Performance => "turbo",
+    }
+}
+
+/// Formats a FanCurve as atrofac's `30c:0%,40c:5%,…` string. atrofac requires
+/// exactly 8 points. Speed values are already percentages (0–100), unlike the
+/// Linux/asusctl path which writes raw PWM.
+fn format_curve(curve: &FanCurve) -> Result<String, String> {
+    if curve.points.len() != 8 {
+        return Err(format!(
+            "atrofac requires exactly 8 fan-curve points, got {}",
+            curve.points.len()
+        ));
+    }
+    Ok(curve
+        .points
+        .iter()
+        .map(|(t, s)| format!("{}c:{}%", *t as u8, s.round() as u8))
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
+// ---------- Unsupported on Windows (no-op stubs) ----------
+
 pub fn read_boost() -> Option<bool> {
     None
 }

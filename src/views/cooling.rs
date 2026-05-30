@@ -2,33 +2,42 @@ use iced::widget::{button, column, container, row, text, text_input, Space};
 use iced::{Element, Length};
 
 use crate::app::{App, Message};
+use crate::platform;
 use crate::theme;
 use crate::views::profile::card_section;
 use crate::widgets::fan_curve;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let header = row![
+    let mut header = row![
         text("Fan Curve").size(16).color(theme::TEXT),
         Space::with_width(Length::Fill),
-        row![
-            text("Hysteresis").size(12).color(theme::SUBTEXT0),
-            text_input("", &app.hyst_str)
-                .on_input(Message::HysteresisChanged)
-                .style(theme::input)
-                .padding([6, 8])
-                .size(13)
-                .width(Length::Fixed(56.0)),
-            text("°C").size(12).color(theme::SUBTEXT0),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(12)
+    .align_y(iced::Alignment::Center);
+
+    // atrofac has no hysteresis setting; only show the input where it applies.
+    if platform::SUPPORTS_FAN_HYSTERESIS {
+        header = header.push(
+            row![
+                text("Hysteresis").size(12).color(theme::SUBTEXT0),
+                text_input("", &app.hyst_str)
+                    .on_input(Message::HysteresisChanged)
+                    .style(theme::input)
+                    .padding([6, 8])
+                    .size(13)
+                    .width(Length::Fixed(56.0)),
+                text("°C").size(12).color(theme::SUBTEXT0),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    header = header.push(
         button(text("Fit").size(13))
             .on_press(Message::FanFit)
             .style(theme::ghost_btn)
             .padding([6, 14]),
-    ]
-    .spacing(12)
-    .align_y(iced::Alignment::Center);
+    );
 
     let canvas = container(fan_curve::view(
         &app.state.fan_curve.points,
@@ -76,9 +85,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .spacing(8)
     .align_y(iced::Alignment::Center);
 
+    let hint = if cfg!(windows) {
+        "Drag points to edit the fan curve. Applied to both CPU and GPU fans via atrofac-cli (also sets the power plan)."
+    } else {
+        "Drag points to edit the per-profile fan curve. Applied for both CPU and GPU fans via asusctl."
+    };
+
     card_section(
         "Cooling",
-        "Drag points to edit the per-profile fan curve. Applied for both CPU and GPU fans via asusctl.",
+        hint,
         column![header, Space::with_height(8), canvas, Space::with_height(14), shift_row]
             .spacing(0),
     )

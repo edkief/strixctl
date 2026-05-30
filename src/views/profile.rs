@@ -21,9 +21,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
 // ---------- Platform Profile ----------
 
 fn profile_card(app: &App) -> Element<'_, Message> {
+    let hint = if cfg!(windows) {
+        "Switches the atrofac power plan (Quiet → silent, Balanced → windows, Performance → turbo)."
+    } else {
+        "Switches asusctl's power profile (Quiet, Balanced, Performance)."
+    };
     card_section(
         "Platform Profile",
-        "Switches asusctl's power profile (Quiet, Balanced, Performance).",
+        hint,
         row![
             profile_seg("Quiet", Profile::Quiet, &app.state.profile),
             profile_seg("Balanced", Profile::Balanced, &app.state.profile),

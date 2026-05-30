@@ -10,11 +10,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let mut tiles: Vec<Element<Message>> = Vec::new();
 
     if platform::SUPPORTS_PLATFORM_PROFILE {
+        let subtitle = if cfg!(windows) {
+            "atrofac power plan"
+        } else {
+            "asusctl platform profile"
+        };
         tiles.push(kpi(
             "Current Profile",
             app.state.profile.as_str().to_string(),
             theme::MAUVE,
-            "asusctl platform profile",
+            subtitle,
         ));
     }
 

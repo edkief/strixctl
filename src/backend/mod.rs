@@ -22,18 +22,15 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
-/// Resolves the ryzenadj executable to invoke.
+/// Resolves an external tool executable to invoke.
 ///
 /// Priority:
-/// 1. `STRIXCTL_RYZENADJ` environment variable (absolute path or name).
-/// 2. On Windows, `ryzenadj.exe` sitting next to the strixctl executable (the
-///    bundled copy, shipped alongside its WinRing0 driver files).
-/// 3. The bare name on `PATH` (`ryzenadj` / `ryzenadj.exe`).
-///
-/// On Linux the bare name `ryzenadj` is kept so the existing polkit policy
-/// (keyed to `/usr/bin/ryzenadj`) still matches under pkexec.
-pub(crate) fn ryzenadj_path() -> PathBuf {
-    if let Ok(p) = std::env::var("STRIXCTL_RYZENADJ") {
+/// 1. The `env_var` environment variable (absolute path or name), if set.
+/// 2. On Windows, `win_exe` sitting next to the strixctl executable (the bundled
+///    copy, shipped alongside any driver files it needs).
+/// 3. The bare name on `PATH` — `win_exe` on Windows, `unix_bare` elsewhere.
+pub(crate) fn resolve_tool(env_var: &str, win_exe: &str, unix_bare: &str) -> PathBuf {
+    if let Ok(p) = std::env::var(env_var) {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
@@ -41,23 +38,30 @@ pub(crate) fn ryzenadj_path() -> PathBuf {
 
     #[cfg(windows)]
     {
-        let exe = "ryzenadj.exe";
+        let _ = unix_bare;
         if let Some(dir) = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         {
-            let candidate = dir.join(exe);
+            let candidate = dir.join(win_exe);
             if candidate.exists() {
                 return candidate;
             }
         }
-        PathBuf::from(exe)
+        PathBuf::from(win_exe)
     }
 
     #[cfg(not(windows))]
     {
-        PathBuf::from("ryzenadj")
+        let _ = win_exe;
+        PathBuf::from(unix_bare)
     }
+}
+
+/// Resolves the ryzenadj executable. On Linux the bare name `ryzenadj` is kept so
+/// the existing polkit policy (keyed to `/usr/bin/ryzenadj`) still matches under pkexec.
+pub(crate) fn ryzenadj_path() -> PathBuf {
+    resolve_tool("STRIXCTL_RYZENADJ", "ryzenadj.exe", "ryzenadj")
 }
 
 /// Parses `ryzenadj --info` table output into PPT limits. The output format is

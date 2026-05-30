@@ -5,10 +5,13 @@
 //! features still exist on every platform (as no-op stubs on Windows), so only
 //! the *UI* needs these flags — the call sites stay platform-agnostic.
 
-/// asusctl platform profiles (Quiet / Balanced / Performance). Linux only.
-pub const SUPPORTS_PLATFORM_PROFILE: bool = cfg!(unix);
-/// asusctl fan-curve editor. Linux only.
-pub const SUPPORTS_FAN_CURVE: bool = cfg!(unix);
+/// Platform power profiles — asusctl (Quiet / Balanced / Performance) on Linux,
+/// atrofac power plans (silent / windows / turbo) on Windows.
+pub const SUPPORTS_PLATFORM_PROFILE: bool = true;
+/// Fan-curve editor — asusctl on Linux, atrofac-cli on Windows.
+pub const SUPPORTS_FAN_CURVE: bool = true;
+/// Per-curve hysteresis buffer. asusctl-only; atrofac has no hysteresis argument.
+pub const SUPPORTS_FAN_HYSTERESIS: bool = cfg!(unix);
 /// CPU boost toggle via sysfs. Linux only.
 pub const SUPPORTS_BOOST: bool = cfg!(unix);
 /// SMT (sibling-thread) toggle via sysfs. Linux only.

@@ -30,7 +30,8 @@ a real Windows path:
 |---------|-----------------|
 | AMD PPT tuning (STAPM / fast / slow) | ✅ via `ryzenadj.exe` |
 | Active core count | ✅ via `bcdedit /set {current} numproc` — **requires a reboot** |
-| Platform profiles, fan curves | ❌ no Windows equivalent (asusctl is Linux-only) — hidden in the UI |
+| Platform profiles (power plans) | ✅ via [`atrofac`](https://github.com/cronosun/atrofac) (Quiet → silent, Balanced → windows, Performance → turbo) |
+| Fan curves | ✅ via `atrofac-cli` — applying a curve also sets the power plan |
 | CPU boost / SMT toggles, temperatures | ❌ no sysfs on Windows — hidden in the UI |
 | Daemon, GNOME extension | ❌ Linux-only |
 
@@ -44,13 +45,23 @@ a real Windows path:
    relative to its own executable (override with the `STRIXCTL_RYZENADJ`
    environment variable). The WinRing0 driver has redistribution restrictions, so
    it is not bundled in this repo — download it yourself.
-3. Run `strixctl.exe`. It starts unprivileged; each PPT or core-count change
-   raises a **UAC prompt** (ryzenadj and bcdedit both require Administrator).
+3. For platform profiles and fan curves, obtain
+   [`atrofac`](https://github.com/cronosun/atrofac) and place `atrofac-cli.exe`
+   next to `strixctl.exe` (override with `STRIXCTL_ATROFAC`). atrofac uses the
+   ASUS Armoury Crate WMI interface (no extra driver) and requires Administrator.
+4. Run `strixctl.exe`. It starts unprivileged; each PPT, core-count, profile, or
+   fan-curve change raises a **UAC prompt** (ryzenadj, bcdedit, and atrofac all
+   require Administrator).
 
 ### Notes
 
 - Core-count changes use `bcdedit numproc`, which only takes effect after a
   **reboot**. The UI shows a "restart to apply" banner until you reboot.
+- atrofac's `fan` command always sets a power plan alongside the curve, so
+  applying a fan curve also applies the mapped plan. atrofac is set-only, so the
+  current plan/curve can't be read back into the UI.
+- Applying a saved profile chains several elevated tools (atrofac plan + fan,
+  ryzenadj, bcdedit), each with its own UAC prompt.
 - Profiles are stored in `%APPDATA%\strixctl\profiles.json`.
 - Reading current PPT values (`ryzenadj --info`) also needs elevation, so it only
   happens when you click **Reload**, never automatically at startup.
