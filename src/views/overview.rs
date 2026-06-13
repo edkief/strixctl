@@ -90,28 +90,33 @@ pub fn view(app: &App) -> Element<'_, Message> {
         }
     }
     if platform::SUPPORTS_PPT {
-        rows.push(summary_row(
-            "Power limits (mW)",
-            format!(
-                "APU {}  ·  slow {}  ·  fast {}",
-                app.state.ppt.apu_limit, app.state.ppt.slow_limit, app.state.ppt.fast_limit
-            ),
+        let ppt = &app.state.ppt;
+        rows.push(summary_row_badges(
+            "Power limits",
+            vec![
+                badge(format!("APU  {:.0} W", ppt.apu_limit as f32 / 1000.0), theme::BLUE),
+                badge(format!("Slow  {:.0} W", ppt.slow_limit as f32 / 1000.0), theme::BLUE),
+                badge(format!("Fast  {:.0} W", ppt.fast_limit as f32 / 1000.0), theme::BLUE),
+            ],
         ));
     }
     if platform::SUPPORTS_FAN_CURVE {
         let pts = &app.state.fan_curve.points;
-        let fan_curve_summary = if pts.is_empty() {
-            "—".to_string()
+        let badges = if pts.is_empty() {
+            vec![badge("—".to_string(), theme::OVERLAY1)]
         } else {
             let (t0, f0) = pts.first().unwrap();
             let (t1, f1) = pts.last().unwrap();
             if pts.len() == 1 {
-                format!("{:.0}°C → {:.0}%", t0, f0)
+                vec![badge(format!("{:.0} C  {:.0}%", t0, f0), theme::TEAL)]
             } else {
-                format!("{:.0}°C → {:.0}%  …  {:.0}°C → {:.0}%", t0, f0, t1, f1)
+                vec![
+                    badge(format!("{:.0} C  {:.0}%", t0, f0), theme::TEAL),
+                    badge(format!("{:.0} C  {:.0}%", t1, f1), theme::TEAL),
+                ]
             }
         };
-        rows.push(summary_row("Fan curve", fan_curve_summary));
+        rows.push(summary_row_badges("Fan curve", badges));
     }
 
     let summary = container(Column::with_children(rows).spacing(6).padding(20))
@@ -156,4 +161,20 @@ fn summary_row<'a>(k: &'a str, v: String) -> Element<'a, Message> {
     ]
     .align_y(Alignment::Center)
     .into()
+}
+
+fn summary_row_badges<'a>(k: &'a str, badges: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    row![
+        text(k).size(13).color(theme::SUBTEXT1).width(Length::FillPortion(1)),
+        Row::with_children(badges).spacing(6).width(Length::FillPortion(2)),
+    ]
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn badge<'a>(label: impl ToString, color: iced::Color) -> Element<'a, Message> {
+    container(text(label.to_string()).size(12).color(color))
+        .style(theme::pill(color))
+        .padding([3, 10])
+        .into()
 }
