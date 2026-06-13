@@ -294,10 +294,17 @@ async fn main() -> zbus::Result<()> {
 
     // Apply the last-active saved profile on daemon startup so system settings
     // are restored after login/reboot without needing the GUI or extension.
+    //
+    // Delay the first apply by 30 s. At session start amdgpu is still bringing up
+    // DCN/DMCUB and asusd is setting its own platform profile/EPP — all of which
+    // touch the Strix Halo SMU mailbox. Firing ryzenadj (which poke the same
+    // mailbox) into that window races amdgpu and hard-locks the machine, so we
+    // wait for that init storm to settle before touching the SMU.
     if let Some(name) = profiles::load_active() {
         let conn_startup = conn.clone();
         let last_applied_startup = last_applied_at.clone();
         tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
             let errors = run_apply_saved_profile(&name).await;
             if errors.is_empty() {
                 *last_applied_startup.lock().unwrap() = Some(Instant::now());
@@ -341,18 +348,18 @@ async fn main() -> zbus::Result<()> {
         }
     });
 
-    // Poll the live hardware state every 5 s. This does two things:
-    //   1. Emits PlatformProfileChanged whenever the asusctl platform profile changes.
+    // Poll the asusctl platform profile every 15 s. This path is cheap and SMU-safe
+    // (it queries asusd over D-Bus, never the SMU mailbox), so it can run often:
+    //   1. Emits PlatformProfileChanged whenever the platform profile changes.
     //   2. Drift guard: if a saved profile is active and another process (e.g. asusd)
-    //      has overwritten any of its settings — the platform profile, or one of the
-    //      PPT power limits (APU/stapm, fast, slow) — re-applies the saved profile.
+    //      has changed the platform profile away from what it requires, re-applies it.
     // The 15 s cooldown after any apply prevents a re-apply loop while asusd is still
     // settling its own power state after a fan-curve enable.
     let conn_clone2 = conn.clone();
     let current_saved_for_guard = current_saved_profile.clone();
     let last_applied_for_guard = last_applied_at.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
         loop {
             interval.tick().await;
             let Some(p) = backend::read_current_profile() else { continue };
@@ -378,8 +385,6 @@ async fn main() -> zbus::Result<()> {
                 }
             }
 
-            // Drift guard — runs every tick, not just when the platform profile
-            // name changes, because asusd can reset PPT without changing the profile.
             let saved_name = current_saved_for_guard.lock().unwrap().clone();
             if saved_name.is_empty() {
                 continue;
@@ -394,21 +399,60 @@ async fn main() -> zbus::Result<()> {
             let Some(saved) = profiles::load().into_iter().find(|sp| sp.name == saved_name)
             else { continue };
 
-            let platform_drift = saved.platform_profile.as_str() != name;
-            let ppt_drift = backend::read_current_ppt()
-                .is_some_and(|cur| ppt_differs(&cur, &saved.ppt));
-
-            if platform_drift || ppt_drift {
-                let what = match (platform_drift, ppt_drift) {
-                    (true, true) => "platform profile and PPT",
-                    (true, false) => "platform profile",
-                    _ => "PPT",
-                };
+            if saved.platform_profile.as_str() != name {
                 eprintln!(
-                    "[strixctld] {what} externally changed; \
+                    "[strixctld] platform profile externally changed; \
                      re-applying saved profile '{saved_name}'"
                 );
                 *last_applied_for_guard.lock().unwrap() = Some(Instant::now());
+                tokio::spawn(async move {
+                    let errors = run_apply_saved_profile(&saved_name).await;
+                    if !errors.is_empty() {
+                        eprintln!(
+                            "[strixctld] guard re-apply errors: {}",
+                            errors.join(" | ")
+                        );
+                    }
+                });
+            }
+        }
+    });
+
+    // PPT drift guard — polled separately every 60 s because, unlike the platform
+    // profile, the only way to read the live PPT limits on Strix Halo is `ryzenadj
+    // --info`, which pokes the SMU mailbox shared with amdgpu. Each read risks a
+    // collision, so we keep it infrequent and gate it behind an active saved profile
+    // plus the 15 s cooldown so it neither spawns pkexec needlessly nor loops.
+    let current_saved_for_ppt = current_saved_profile.clone();
+    let last_applied_for_ppt = last_applied_at.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+
+            let saved_name = current_saved_for_ppt.lock().unwrap().clone();
+            if saved_name.is_empty() {
+                continue;
+            }
+            let cooldown_ok = last_applied_for_ppt
+                .lock().unwrap()
+                .map_or(true, |t| t.elapsed() > Duration::from_secs(15));
+            if !cooldown_ok {
+                continue;
+            }
+
+            let Some(saved) = profiles::load().into_iter().find(|sp| sp.name == saved_name)
+            else { continue };
+
+            let ppt_drift = backend::read_current_ppt()
+                .is_some_and(|cur| ppt_differs(&cur, &saved.ppt));
+
+            if ppt_drift {
+                eprintln!(
+                    "[strixctld] PPT externally changed; \
+                     re-applying saved profile '{saved_name}'"
+                );
+                *last_applied_for_ppt.lock().unwrap() = Some(Instant::now());
                 tokio::spawn(async move {
                     let errors = run_apply_saved_profile(&saved_name).await;
                     if !errors.is_empty() {
