@@ -26,6 +26,10 @@ windows-sys = { version = "0.59", features = [
 
 [features]
 daemon = ["zbus"]
+# Periodic PPT drift guard. Reads live PPT via `ryzenadj --info`, which pokes the
+# Strix Halo SMU mailbox shared with amdgpu and can hard-lock the machine. Off by
+# default; the platform-profile drift guard (SMU-safe) is always active.
+ppt-drift-guard = []
 
 [[bin]]
 name = "strixctld"

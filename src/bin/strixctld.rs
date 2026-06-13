@@ -423,6 +423,12 @@ async fn main() -> zbus::Result<()> {
     // --info`, which pokes the SMU mailbox shared with amdgpu. Each read risks a
     // collision, so we keep it infrequent and gate it behind an active saved profile
     // plus the 15 s cooldown so it neither spawns pkexec needlessly nor loops.
+    //
+    // Disabled by default: even at 60 s the SMU read can race amdgpu and hard-lock
+    // the machine. Enable with `--features ppt-drift-guard` to trade that risk for
+    // catching another process silently changing the APU/fast/slow power limits.
+    #[cfg(feature = "ppt-drift-guard")]
+    {
     let current_saved_for_ppt = current_saved_profile.clone();
     let last_applied_for_ppt = last_applied_at.clone();
     tokio::spawn(async move {
@@ -465,6 +471,7 @@ async fn main() -> zbus::Result<()> {
             }
         }
     });
+    }
 
     // Poll active-profile file every 5 s; emit SavedProfileChanged on change.
     // This is a fallback for cases where the gdbus notification from the GUI
