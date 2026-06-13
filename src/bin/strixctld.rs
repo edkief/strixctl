@@ -25,7 +25,7 @@ mod profiles;
 
 use std::fs;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zbus::{connection, fdo, interface, object_server::SignalContext};
 
@@ -39,6 +39,7 @@ struct StrixCtlService {
     current_saved_profile: Arc<Mutex<String>>,
     boost_enabled: Arc<Mutex<bool>>,
     core_preset: Arc<Mutex<u32>>,
+    last_applied_at: Arc<Mutex<Option<Instant>>>,
 }
 
 #[interface(name = "com.strixctl.Service")]
@@ -62,6 +63,7 @@ impl StrixCtlService {
     ) -> fdo::Result<()> {
         let errors = run_apply_saved_profile(name).await;
         if errors.is_empty() {
+            *self.last_applied_at.lock().unwrap() = Some(Instant::now());
             profiles::save_active(name);
             let changed = {
                 let mut guard = self.current_saved_profile.lock().unwrap();
@@ -93,7 +95,9 @@ impl StrixCtlService {
                 )))
             }
         };
-        backend::apply_profile(&p).map_err(fdo::Error::Failed)
+        backend::apply_profile(&p).map_err(fdo::Error::Failed)?;
+        *self.last_applied_at.lock().unwrap() = Some(Instant::now());
+        Ok(())
     }
 
     /// Applies PPT limits directly (values in milliwatts).
@@ -257,6 +261,7 @@ async fn main() -> zbus::Result<()> {
     let core_preset = Arc::new(Mutex::new(
         backend::read_core_preset().as_u32()
     ));
+    let last_applied_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     let service = StrixCtlService {
         current_temp: current_temp.clone(),
@@ -264,6 +269,7 @@ async fn main() -> zbus::Result<()> {
         current_saved_profile: current_saved_profile.clone(),
         boost_enabled: boost_enabled.clone(),
         core_preset: core_preset.clone(),
+        last_applied_at: last_applied_at.clone(),
     };
 
     let conn = connection::Builder::session()?
@@ -276,9 +282,11 @@ async fn main() -> zbus::Result<()> {
     // are restored after login/reboot without needing the GUI or extension.
     if let Some(name) = profiles::load_active() {
         let conn_startup = conn.clone();
+        let last_applied_startup = last_applied_at.clone();
         tokio::spawn(async move {
             let errors = run_apply_saved_profile(&name).await;
             if errors.is_empty() {
+                *last_applied_startup.lock().unwrap() = Some(Instant::now());
                 eprintln!("[strixctld] startup: applied profile '{name}'");
                 if let Ok(iref) = conn_startup
                     .object_server()
@@ -320,7 +328,12 @@ async fn main() -> zbus::Result<()> {
     });
 
     // Poll asusctl platform profile every 5 s; emit PlatformProfileChanged on change.
+    // When the change is external (another process overwrote our settings) and a saved
+    // profile is active, re-apply it — provided we haven't applied within the last 15 s
+    // (the cooldown prevents a re-apply loop while asusd is settling after fan-curve enable).
     let conn_clone2 = conn.clone();
+    let current_saved_for_guard = current_saved_profile.clone();
+    let last_applied_for_guard = last_applied_at.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -345,6 +358,43 @@ async fn main() -> zbus::Result<()> {
                     let _ = StrixCtlService::platform_profile_changed(
                         iref.signal_context(), &name,
                     ).await;
+                }
+
+                // Re-apply guard: if a saved profile is active and the new platform
+                // profile doesn't match what it requires, another process changed it.
+                let saved_name = current_saved_for_guard.lock().unwrap().clone();
+                if !saved_name.is_empty() {
+                    let cooldown_ok = last_applied_for_guard
+                        .lock().unwrap()
+                        .map_or(true, |t| t.elapsed() > Duration::from_secs(15));
+
+                    if cooldown_ok {
+                        let saved_profiles = profiles::load();
+                        let wants_profile = saved_profiles
+                            .iter()
+                            .find(|p| p.name == saved_name)
+                            .map(|p| p.platform_profile.as_str().to_string());
+
+                        let should_reapply = wants_profile
+                            .map_or(false, |want| want != name);
+
+                        if should_reapply {
+                            eprintln!(
+                                "[strixctld] platform profile externally changed to '{name}'; \
+                                 re-applying saved profile '{saved_name}'"
+                            );
+                            *last_applied_for_guard.lock().unwrap() = Some(Instant::now());
+                            tokio::spawn(async move {
+                                let errors = run_apply_saved_profile(&saved_name).await;
+                                if !errors.is_empty() {
+                                    eprintln!(
+                                        "[strixctld] guard re-apply errors: {}",
+                                        errors.join(" | ")
+                                    );
+                                }
+                            });
+                        }
+                    }
                 }
             }
         }
