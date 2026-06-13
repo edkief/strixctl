@@ -246,6 +246,20 @@ async fn run_apply_saved_profile(name: &str) -> Vec<String> {
     errors
 }
 
+/// PPT comparison tolerance in milliwatts. `ryzenadj --info` reports limits in
+/// whole watts and firmware may round them slightly, so differences below this
+/// threshold are treated as noise rather than an external change.
+const PPT_TOLERANCE_MW: u32 = 500;
+
+/// Returns true when any of the three power limits (APU/stapm, fast, slow)
+/// differs from `wanted` by more than `PPT_TOLERANCE_MW`.
+fn ppt_differs(current: &PptLimits, wanted: &PptLimits) -> bool {
+    let off = |a: u32, b: u32| a.abs_diff(b) > PPT_TOLERANCE_MW;
+    off(current.apu_limit, wanted.apu_limit)
+        || off(current.fast_limit, wanted.fast_limit)
+        || off(current.slow_limit, wanted.slow_limit)
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -327,10 +341,13 @@ async fn main() -> zbus::Result<()> {
         }
     });
 
-    // Poll asusctl platform profile every 5 s; emit PlatformProfileChanged on change.
-    // When the change is external (another process overwrote our settings) and a saved
-    // profile is active, re-apply it — provided we haven't applied within the last 15 s
-    // (the cooldown prevents a re-apply loop while asusd is settling after fan-curve enable).
+    // Poll the live hardware state every 5 s. This does two things:
+    //   1. Emits PlatformProfileChanged whenever the asusctl platform profile changes.
+    //   2. Drift guard: if a saved profile is active and another process (e.g. asusd)
+    //      has overwritten any of its settings — the platform profile, or one of the
+    //      PPT power limits (APU/stapm, fast, slow) — re-applies the saved profile.
+    // The 15 s cooldown after any apply prevents a re-apply loop while asusd is still
+    // settling its own power state after a fan-curve enable.
     let conn_clone2 = conn.clone();
     let current_saved_for_guard = current_saved_profile.clone();
     let last_applied_for_guard = last_applied_at.clone();
@@ -359,43 +376,48 @@ async fn main() -> zbus::Result<()> {
                         iref.signal_context(), &name,
                     ).await;
                 }
+            }
 
-                // Re-apply guard: if a saved profile is active and the new platform
-                // profile doesn't match what it requires, another process changed it.
-                let saved_name = current_saved_for_guard.lock().unwrap().clone();
-                if !saved_name.is_empty() {
-                    let cooldown_ok = last_applied_for_guard
-                        .lock().unwrap()
-                        .map_or(true, |t| t.elapsed() > Duration::from_secs(15));
+            // Drift guard — runs every tick, not just when the platform profile
+            // name changes, because asusd can reset PPT without changing the profile.
+            let saved_name = current_saved_for_guard.lock().unwrap().clone();
+            if saved_name.is_empty() {
+                continue;
+            }
+            let cooldown_ok = last_applied_for_guard
+                .lock().unwrap()
+                .map_or(true, |t| t.elapsed() > Duration::from_secs(15));
+            if !cooldown_ok {
+                continue;
+            }
 
-                    if cooldown_ok {
-                        let saved_profiles = profiles::load();
-                        let wants_profile = saved_profiles
-                            .iter()
-                            .find(|p| p.name == saved_name)
-                            .map(|p| p.platform_profile.as_str().to_string());
+            let Some(saved) = profiles::load().into_iter().find(|sp| sp.name == saved_name)
+            else { continue };
 
-                        let should_reapply = wants_profile
-                            .map_or(false, |want| want != name);
+            let platform_drift = saved.platform_profile.as_str() != name;
+            let ppt_drift = backend::read_current_ppt()
+                .is_some_and(|cur| ppt_differs(&cur, &saved.ppt));
 
-                        if should_reapply {
-                            eprintln!(
-                                "[strixctld] platform profile externally changed to '{name}'; \
-                                 re-applying saved profile '{saved_name}'"
-                            );
-                            *last_applied_for_guard.lock().unwrap() = Some(Instant::now());
-                            tokio::spawn(async move {
-                                let errors = run_apply_saved_profile(&saved_name).await;
-                                if !errors.is_empty() {
-                                    eprintln!(
-                                        "[strixctld] guard re-apply errors: {}",
-                                        errors.join(" | ")
-                                    );
-                                }
-                            });
-                        }
+            if platform_drift || ppt_drift {
+                let what = match (platform_drift, ppt_drift) {
+                    (true, true) => "platform profile and PPT",
+                    (true, false) => "platform profile",
+                    _ => "PPT",
+                };
+                eprintln!(
+                    "[strixctld] {what} externally changed; \
+                     re-applying saved profile '{saved_name}'"
+                );
+                *last_applied_for_guard.lock().unwrap() = Some(Instant::now());
+                tokio::spawn(async move {
+                    let errors = run_apply_saved_profile(&saved_name).await;
+                    if !errors.is_empty() {
+                        eprintln!(
+                            "[strixctld] guard re-apply errors: {}",
+                            errors.join(" | ")
+                        );
                     }
-                }
+                });
             }
         }
     });
