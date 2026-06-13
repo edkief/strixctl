@@ -99,10 +99,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ));
     }
     if platform::SUPPORTS_FAN_CURVE {
-        rows.push(summary_row(
-            "Fan curve points",
-            format!("{} points", app.state.fan_curve.points.len()),
-        ));
+        let pts = &app.state.fan_curve.points;
+        let fan_curve_summary = if pts.is_empty() {
+            "—".to_string()
+        } else {
+            let (t0, f0) = pts.first().unwrap();
+            let (t1, f1) = pts.last().unwrap();
+            if pts.len() == 1 {
+                format!("{:.0}°C → {:.0}%", t0, f0)
+            } else {
+                format!("{:.0}°C → {:.0}%  …  {:.0}°C → {:.0}%", t0, f0, t1, f1)
+            }
+        };
+        rows.push(summary_row("Fan curve", fan_curve_summary));
     }
 
     let summary = container(Column::with_children(rows).spacing(6).padding(20))
