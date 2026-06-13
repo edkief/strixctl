@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use iced::widget::{button, column, container, row, text, Space};
-use iced::{Alignment, Element, Length, Subscription, Task, Theme};
+use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
 
 use crate::backend;
 use crate::platform;
@@ -179,6 +179,9 @@ impl App {
                 let r = watcher::read_now();
                 self.state.current_temp = r.temp_c;
                 self.state.current_gpu_temp = r.gpu_temp_c;
+                self.state.current_cpu_fan_rpm = r.cpu_fan_rpm;
+                self.state.current_gpu_fan_rpm = r.gpu_fan_rpm;
+                self.state.current_battery_discharge_w = r.battery_discharge_w;
                 // Auto-safety
                 if r.temp_c > 95.0 && self.state.profile != Profile::Performance {
                     self.state.profile = Profile::Performance;
@@ -605,6 +608,15 @@ impl App {
         if let Some(g) = self.state.current_gpu_temp {
             right = right.push(temp_pill("GPU", g));
         }
+        if let Some(rpm) = self.state.current_cpu_fan_rpm {
+            right = right.push(info_pill("CPU FAN", format!("{rpm} rpm"), theme::SKY));
+        }
+        if let Some(rpm) = self.state.current_gpu_fan_rpm {
+            right = right.push(info_pill("GPU FAN", format!("{rpm} rpm"), theme::SKY));
+        }
+        if let Some(w) = self.state.current_battery_discharge_w {
+            right = right.push(info_pill("BATT", format!("{w:.1} W"), theme::YELLOW));
+        }
         right = right.push(
             button(text("Reload").size(13))
                 .on_press(Message::Reload)
@@ -697,6 +709,17 @@ fn temp_pill<'a>(label: &'static str, t: f32) -> Element<'a, Message> {
     let color = theme::temp_level_color(t);
     container(
         text(format!("{}  {:.1}°C", label, t))
+            .size(12)
+            .color(color),
+    )
+    .style(theme::pill(color))
+    .padding([4, 10])
+    .into()
+}
+
+fn info_pill<'a>(label: &'static str, value: String, color: Color) -> Element<'a, Message> {
+    container(
+        text(format!("{label}  {value}"))
             .size(12)
             .color(color),
     )

@@ -116,6 +116,9 @@ pub struct AppState {
     pub core_reboot_pending: bool,
     pub current_temp: f32,
     pub current_gpu_temp: Option<f32>,
+    pub current_cpu_fan_rpm: Option<u32>,
+    pub current_gpu_fan_rpm: Option<u32>,
+    pub current_battery_discharge_w: Option<f32>,
     pub current_power: f32,
     pub status_msg: String,
 }
@@ -132,6 +135,9 @@ impl Default for AppState {
             core_reboot_pending: false,
             current_temp: 0.0,
             current_gpu_temp: None,
+            current_cpu_fan_rpm: None,
+            current_gpu_fan_rpm: None,
+            current_battery_discharge_w: None,
             current_power: 0.0,
             status_msg: String::from("Ready"),
         }
