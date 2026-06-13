@@ -1,22 +1,34 @@
-use iced::widget::{button, column, container, row, text, text_input, toggler, Space};
+use iced::widget::{button, column, container, row, text, text_input, toggler, Column, Space};
 use iced::{Alignment, Element, Length};
 
 use crate::app::{App, Message};
+use crate::platform;
 use crate::state::{CorePreset, Profile};
 use crate::theme;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    column![profile_card(app), ppt_card(app), cpu_card(app)]
-        .spacing(20)
-        .into()
+    let mut cards: Vec<Element<Message>> = Vec::new();
+    if platform::SUPPORTS_PLATFORM_PROFILE {
+        cards.push(profile_card(app));
+    }
+    if platform::SUPPORTS_PPT {
+        cards.push(ppt_card(app));
+    }
+    cards.push(cpu_card(app));
+    Column::with_children(cards).spacing(20).into()
 }
 
 // ---------- Platform Profile ----------
 
 fn profile_card(app: &App) -> Element<'_, Message> {
+    let hint = if cfg!(windows) {
+        "Switches the atrofac power plan (Quiet → silent, Balanced → windows, Performance → turbo)."
+    } else {
+        "Switches asusctl's power profile (Quiet, Balanced, Performance)."
+    };
     card_section(
         "Platform Profile",
-        "Switches asusctl's power profile (Quiet, Balanced, Performance).",
+        hint,
         row![
             profile_seg("Quiet", Profile::Quiet, &app.state.profile),
             profile_seg("Balanced", Profile::Balanced, &app.state.profile),
@@ -52,9 +64,15 @@ fn ppt_card(app: &App) -> Element<'_, Message> {
         apply = apply.on_press(Message::ApplyPpt);
     }
 
+    let hint = if cfg!(windows) {
+        "ryzenadj STAPM / slow / fast PPT — requires Administrator (UAC prompt)."
+    } else {
+        "ryzenadj STAPM / slow / fast PPT — requires pkexec authorization."
+    };
+
     card_section(
         "Power Limits (mW)",
-        "ryzenadj STAPM / slow / fast PPT — requires pkexec authorization.",
+        hint,
         column![
             row![
                 labelled_input("APU / STAPM", &app.ppt_apu_str, Message::PptApuChanged),
@@ -138,40 +156,72 @@ fn cpu_card(app: &App) -> Element<'_, Message> {
     let cores = app.state.core_preset.as_u32();
     let threads = if smt { cores * 2 } else { cores };
 
-    card_section(
-        "CPU",
+    let mut items: Vec<Element<Message>> = Vec::new();
+
+    if platform::SUPPORTS_BOOST {
+        items.push(control_row(
+            "CPU Boost",
+            "Sets /sys/devices/system/cpu/cpufreq/boost.",
+            toggler(app.state.boost_enabled)
+                .on_toggle(Message::BoostToggled)
+                .size(22)
+                .into(),
+            Message::ApplyBoost,
+        ));
+    }
+    if platform::SUPPORTS_SMT {
+        if !items.is_empty() {
+            items.push(divider());
+        }
+        items.push(control_row(
+            "SMT",
+            "Simultaneous multi-threading — sibling threads on or off.",
+            toggler(smt).on_toggle(Message::SmtToggled).size(22).into(),
+            Message::ApplySmt,
+        ));
+    }
+    if platform::SUPPORTS_CORE_PRESET {
+        if !items.is_empty() {
+            items.push(divider());
+        }
+        let cores_hint = if platform::CORE_PRESET_NEEDS_REBOOT {
+            format!("Currently {cores}C / {threads}T. Applied via bcdedit — takes effect after a reboot.")
+        } else {
+            format!("Currently {cores}C / {threads}T.")
+        };
+        items.push(control_row(
+            "Active Cores",
+            &cores_hint,
+            core_preset_segment(&app.state.core_preset, smt),
+            Message::ApplyCorePreset,
+        ));
+        if platform::CORE_PRESET_NEEDS_REBOOT && app.state.core_reboot_pending {
+            items.push(reboot_banner());
+        }
+    }
+
+    let card_hint = if platform::SUPPORTS_BOOST {
         "Boost, SMT, and core-count controls. Apply SMT before changing the \
-         core preset — sibling threads vanish from sysfs when SMT is off.",
-        column![
-            control_row(
-                "CPU Boost",
-                "Sets /sys/devices/system/cpu/cpufreq/boost.",
-                toggler(app.state.boost_enabled)
-                    .on_toggle(Message::BoostToggled)
-                    .size(22)
-                    .into(),
-                Message::ApplyBoost,
-            ),
-            divider(),
-            control_row(
-                "SMT",
-                "Simultaneous multi-threading — sibling threads on or off.",
-                toggler(smt)
-                    .on_toggle(Message::SmtToggled)
-                    .size(22)
-                    .into(),
-                Message::ApplySmt,
-            ),
-            divider(),
-            control_row(
-                "Active Cores",
-                &format!("Currently {cores}C / {threads}T."),
-                core_preset_segment(&app.state.core_preset, smt),
-                Message::ApplyCorePreset,
-            ),
-        ]
-        .spacing(0),
-    )
+         core preset — sibling threads vanish from sysfs when SMT is off."
+    } else {
+        "Active core-count control via bcdedit (requires a reboot to apply)."
+    };
+
+    card_section("CPU", card_hint, Column::with_children(items).spacing(0))
+}
+
+fn reboot_banner<'a>() -> Element<'a, Message> {
+    column![
+        Space::with_height(12),
+        container(
+            text("⚠  Core-count change pending — restart Windows to apply.")
+                .size(12)
+                .color(theme::BASE),
+        )
+        .style(theme::pill(theme::PEACH))
+        .padding([6, 12]),
+    ]
+    .into()
 }
 
 fn control_row<'a>(

@@ -1,3 +1,7 @@
+//! Linux backend: asusctl platform profiles & fan curves, ryzenadj PPT tuning
+//! (via pkexec), and CPU boost/SMT/core-count control through sysfs and the
+//! `strixctl-cpuctl` privileged helper.
+
 use std::process::Command;
 
 use crate::state::{CorePreset, FanCurve, PptLimits, Profile};
@@ -7,8 +11,10 @@ pub fn apply_profile(profile: &Profile) -> Result<(), String> {
 }
 
 pub fn apply_ppt(ppt: &PptLimits) -> Result<(), String> {
+    let ryzenadj = super::ryzenadj_path();
+    let ryzenadj = ryzenadj.to_str().unwrap_or("ryzenadj");
     run_cmd("pkexec", &[
-        "ryzenadj",
+        ryzenadj,
         &format!("--stapm-limit={}", ppt.apu_limit),
         &format!("--fast-limit={}", ppt.fast_limit),
         &format!("--slow-limit={}", ppt.slow_limit),
@@ -103,39 +109,13 @@ fn extract_paren_u32s(s: &str) -> Option<Vec<u32>> {
 }
 
 /// Reads current PPT limits from `ryzenadj --info` (requires pkexec).
-/// ryzenadj reports values in Watts; we convert to mW for storage.
 pub fn read_current_ppt() -> Option<PptLimits> {
+    let ryzenadj = super::ryzenadj_path();
     let out = Command::new("pkexec")
-        .args(["ryzenadj", "--info"])
+        .args([ryzenadj.to_str().unwrap_or("ryzenadj"), "--info"])
         .output()
         .ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut apu: Option<u32> = None;
-    let mut fast: Option<u32> = None;
-    let mut slow: Option<u32> = None;
-    for line in stdout.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains("stapm limit") {
-            apu = parse_ryzenadj_value(line);
-        } else if lower.contains("ppt limit fast") {
-            fast = parse_ryzenadj_value(line);
-        } else if lower.contains("ppt limit slow") {
-            slow = parse_ryzenadj_value(line);
-        }
-    }
-    Some(PptLimits {
-        apu_limit: apu?,
-        fast_limit: fast?,
-        slow_limit: slow?,
-    })
-}
-
-/// Extracts the numeric value (Watts) from a ryzenadj --info table row and converts to mW.
-/// Row format: `|STAPM LIMIT            |     15.000|  stapm-limit     |`
-fn parse_ryzenadj_value(line: &str) -> Option<u32> {
-    let col = line.split('|').nth(2)?;
-    let watts: f32 = col.trim().parse().ok()?;
-    Some((watts * 1000.0).round() as u32)
+    super::parse_ryzenadj_info(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Reads current CPU boost state from sysfs (no root required).
@@ -176,6 +156,11 @@ pub fn read_core_preset() -> CorePreset {
     } else {
         CorePreset::Sixteen
     }
+}
+
+/// Core-count changes are live on Linux (sysfs hotplug), so a reboot is never pending.
+pub fn core_reboot_pending() -> bool {
+    false
 }
 
 /// Enables or disables CPU boost via the privileged helper.
