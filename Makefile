@@ -64,7 +64,7 @@ uninstall-desktop:
 # systemd/strixctld.service.  The D-Bus session activation file goes in the
 # XDG user services dir so the session bus can auto-start the daemon.
 install-daemon:
-	cargo install --path . --features daemon --bin strixctld
+	install -Dm755 target/release/strixctld $(HOME)/.cargo/bin/strixctld
 	install -d $(DBUS_USER_DIR)
 	printf '[D-BUS Service]\nName=com.strixctl.Service\nExec=%s/.cargo/bin/strixctld\n' \
 	    '$(HOME)' > $(DBUS_USER_DIR)/com.strixctl.Service.service
@@ -93,7 +93,7 @@ uninstall-extension:
 
 .PHONY: all uninstall
 
-all: build install-bin install-desktop install-polkit install-daemon install-systemd install-extension
+all: build install-polkit install-daemon install-systemd install-extension install-bin install-desktop
 	systemctl --user restart strixctld || systemctl --user start strixctld
 	@echo ""
 	@echo "Installation complete."
