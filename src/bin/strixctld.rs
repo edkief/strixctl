@@ -359,7 +359,12 @@ async fn main() -> zbus::Result<()> {
     let current_saved_for_guard = current_saved_profile.clone();
     let last_applied_for_guard = last_applied_at.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        // Offset the first tick by a full period. The read itself is SMU-safe, but a
+        // drift re-apply runs asusctl/ryzenadj; deferring the first tick keeps any
+        // re-apply out of the startup window the 30 s apply delay is protecting.
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(15),
+                                     Duration::from_secs(15));
         loop {
             interval.tick().await;
             let Some(p) = backend::read_current_profile() else { continue };
@@ -432,7 +437,13 @@ async fn main() -> zbus::Result<()> {
     let current_saved_for_ppt = current_saved_profile.clone();
     let last_applied_for_ppt = last_applied_at.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        // Offset the first tick by a full period. `tokio::time::interval` fires its
+        // first tick immediately, which would poke the SMU via `ryzenadj --info` at
+        // t≈0 — right in amdgpu's init window — defeating the startup delay. Start
+        // the first read 60 s out instead.
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(60),
+                                     Duration::from_secs(60));
         loop {
             interval.tick().await;
 
