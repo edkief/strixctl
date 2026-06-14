@@ -1,4 +1,5 @@
 PREFIX ?= /usr/local
+PPT_DRIFT_GUARD ?= 0
 
 # Auto-detect whether sudo is needed; override with: make SUDO=doas all
 ifeq ($(shell id -u),0)
@@ -15,13 +16,18 @@ DBUS_USER_DIR  := $(HOME)/.local/share/dbus-1/services
 
 .PHONY: build build-daemon
 
+DAEMON_FEATURES := daemon
+ifeq ($(PPT_DRIFT_GUARD),1)
+DAEMON_FEATURES := daemon,ppt-drift-guard
+endif
+
 build:
 	cargo build --release
-	cargo build --release --features daemon --bin strixctld
+	cargo build --release --features "$(DAEMON_FEATURES)" --bin strixctld
 	cargo build --release --bin strixctl-cpuctl
 
 build-daemon:
-	cargo build --release --features daemon --bin strixctld
+	cargo build --release --features "$(DAEMON_FEATURES)" --bin strixctld
 
 # ── System install (needs sudo) ───────────────────────────────────────────
 
