@@ -27,9 +27,29 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use zbus::{connection, fdo, interface, object_server::SignalContext};
 
 use crate::state::{CorePreset, FanCurve, PptLimits, Profile};
+
+/// Proxy for systemd-logind's sleep-state signal, used to detect resume from
+/// suspend. `PrepareForSleep(true)` fires just before the machine sleeps;
+/// `PrepareForSleep(false)` fires right after it wakes.
+#[zbus::proxy(
+    interface = "org.freedesktop.login1.Manager",
+    default_service = "org.freedesktop.login1",
+    default_path = "/org/freedesktop/login1"
+)]
+trait Login1Manager {
+    #[zbus(signal)]
+    fn prepare_for_sleep(&self, start: bool) -> zbus::Result<()>;
+}
+
+/// How long to hold off SMU-touching re-applies after resuming from suspend.
+/// Mirrors the startup delay: amdgpu re-inits DCN/DMCUB on resume just like on
+/// boot, and asusd re-asserts its own platform profile/EPP, so a drift guard
+/// firing ryzenadj into that window risks the same mailbox collision.
+const RESUME_QUIET_PERIOD: Duration = Duration::from_secs(30);
 
 // ── D-Bus interface ──────────────────────────────────────────────────────────
 
@@ -276,6 +296,7 @@ async fn main() -> zbus::Result<()> {
         backend::read_core_preset().as_u32()
     ));
     let last_applied_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let resume_quiet_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     let service = StrixCtlService {
         current_temp: current_temp.clone(),
@@ -324,6 +345,43 @@ async fn main() -> zbus::Result<()> {
         });
     }
 
+    // Watch systemd-logind for resume-from-sleep so the drift guards below don't
+    // poke the SMU mailbox while amdgpu is still re-initializing after wake, the
+    // same hazard the 30 s startup delay above guards against on boot.
+    {
+        let resume_quiet_until = resume_quiet_until.clone();
+        tokio::spawn(async move {
+            let system_conn = match connection::Builder::system() {
+                Ok(builder) => match builder.build().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("[strixctld] system bus connect failed, resume guard disabled: {e}");
+                        return;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[strixctld] system bus builder failed, resume guard disabled: {e}");
+                    return;
+                }
+            };
+            let Ok(login1) = Login1ManagerProxy::new(&system_conn).await else {
+                eprintln!("[strixctld] logind proxy unavailable, resume guard disabled");
+                return;
+            };
+            let Ok(mut sleep_signals) = login1.receive_prepare_for_sleep().await else {
+                eprintln!("[strixctld] logind PrepareForSleep subscribe failed, resume guard disabled");
+                return;
+            };
+            while let Some(signal) = sleep_signals.next().await {
+                let Ok(args) = signal.args() else { continue };
+                if !args.start {
+                    eprintln!("[strixctld] resume from sleep detected; holding SMU guards for {}s", RESUME_QUIET_PERIOD.as_secs());
+                    *resume_quiet_until.lock().unwrap() = Some(Instant::now() + RESUME_QUIET_PERIOD);
+                }
+            }
+        });
+    }
+
     // Poll CPU temp every second; emit TempChanged when it shifts by > 0.5 °C.
     let conn_clone = conn.clone();
     tokio::spawn(async move {
@@ -358,6 +416,7 @@ async fn main() -> zbus::Result<()> {
     let conn_clone2 = conn.clone();
     let current_saved_for_guard = current_saved_profile.clone();
     let last_applied_for_guard = last_applied_at.clone();
+    let resume_quiet_for_guard = resume_quiet_until.clone();
     tokio::spawn(async move {
         // Offset the first tick by a full period. The read itself is SMU-safe, but a
         // drift re-apply runs asusctl/ryzenadj; deferring the first tick keeps any
@@ -397,7 +456,10 @@ async fn main() -> zbus::Result<()> {
             let cooldown_ok = last_applied_for_guard
                 .lock().unwrap()
                 .map_or(true, |t| t.elapsed() > Duration::from_secs(15));
-            if !cooldown_ok {
+            let resume_quiet_ok = resume_quiet_for_guard
+                .lock().unwrap()
+                .map_or(true, |deadline| Instant::now() >= deadline);
+            if !cooldown_ok || !resume_quiet_ok {
                 continue;
             }
 
@@ -436,6 +498,7 @@ async fn main() -> zbus::Result<()> {
     {
     let current_saved_for_ppt = current_saved_profile.clone();
     let last_applied_for_ppt = last_applied_at.clone();
+    let resume_quiet_for_ppt = resume_quiet_until.clone();
     tokio::spawn(async move {
         // Offset the first tick by a full period. `tokio::time::interval` fires its
         // first tick immediately, which would poke the SMU via `ryzenadj --info` at
@@ -454,7 +517,10 @@ async fn main() -> zbus::Result<()> {
             let cooldown_ok = last_applied_for_ppt
                 .lock().unwrap()
                 .map_or(true, |t| t.elapsed() > Duration::from_secs(15));
-            if !cooldown_ok {
+            let resume_quiet_ok = resume_quiet_for_ppt
+                .lock().unwrap()
+                .map_or(true, |deadline| Instant::now() >= deadline);
+            if !cooldown_ok || !resume_quiet_ok {
                 continue;
             }
 

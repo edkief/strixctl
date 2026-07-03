@@ -14,6 +14,7 @@ serde_json = "1"
 # on Windows, which never enables this feature.
 [target.'cfg(unix)'.dependencies]
 zbus = { version = "4", features = ["tokio"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 
 # Windows: UAC elevation ("runas") for ryzenadj.exe and bcdedit via ShellExecuteEx.
 [target.'cfg(windows)'.dependencies]
@@ -25,7 +26,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [features]
-daemon = ["zbus"]
+daemon = ["zbus", "futures-util"]
 # Periodic PPT drift guard. Reads live PPT via `ryzenadj --info`, which pokes the
 # Strix Halo SMU mailbox shared with amdgpu and can hard-lock the machine. Off by
 # default; the platform-profile drift guard (SMU-safe) is always active.
