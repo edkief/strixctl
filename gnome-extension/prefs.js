@@ -90,7 +90,7 @@ export default class StrixCtrlPrefs extends ExtensionPreferences {
 
         const pillGroup = new Adw.PreferencesGroup({
             title: 'Panel Pill',
-            description: 'A live readout in the top bar, next to the clock. ' +
+            description: 'A live readout at the right of the top bar. ' +
                 'It needs the strixctld daemon running.',
         });
         page.add(pillGroup);

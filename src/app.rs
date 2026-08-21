@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use iced::widget::{button, column, container, row, text, Space};
+use iced::widget::{button, column, container, row, text, Row, Space};
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
 
 use crate::backend;
@@ -676,45 +676,60 @@ impl App {
         .spacing(10)
         .align_y(Alignment::Center);
 
-        let mut right = row![].spacing(8).align_y(Alignment::Center);
+        // Sensor pills live on their own row: six of them plus the title left no
+        // room on one line, and the Reload button was the first thing squeezed.
+        let mut pills: Vec<Element<'_, Message>> = Vec::new();
         if self.state.current_temp > 0.0 {
-            right = right.push(temp_pill("CPU", self.state.current_temp));
+            pills.push(temp_pill("CPU", self.state.current_temp));
         }
         if let Some(g) = self.state.current_gpu_temp {
-            right = right.push(temp_pill("GPU", g));
+            pills.push(temp_pill("GPU", g));
         }
         if let Some(mhz) = self.state.current_cpu_freq_mhz {
             let label = match self.state.max_freq_khz {
                 Some(cap) => format!("{:.2} GHz / {} cap", mhz as f32 / 1000.0, cap / 1000),
                 None => format!("{:.2} GHz", mhz as f32 / 1000.0),
             };
-            right = right.push(info_pill("CPU FREQ", label, theme::SKY));
+            pills.push(info_pill("CPU FREQ", label, theme::SKY));
         }
         if let Some(rpm) = self.state.current_cpu_fan_rpm {
-            right = right.push(info_pill("CPU FAN", format!("{rpm} rpm"), theme::SKY));
+            pills.push(info_pill("CPU FAN", format!("{rpm} rpm"), theme::SKY));
         }
         if let Some(rpm) = self.state.current_gpu_fan_rpm {
-            right = right.push(info_pill("GPU FAN", format!("{rpm} rpm"), theme::SKY));
+            pills.push(info_pill("GPU FAN", format!("{rpm} rpm"), theme::SKY));
         }
         if let Some(w) = self.state.current_battery_discharge_w {
             let label = match self.state.current_battery_minutes_left {
                 Some(min) => format!("{w:.1} W · {}h{:02}", min / 60, min % 60),
                 None => format!("{w:.1} W"),
             };
-            right = right.push(info_pill("BATT", label, theme::YELLOW));
+            pills.push(info_pill("BATT", label, theme::YELLOW));
         }
-        right = right.push(
-            button(text("Reload").size(13))
-                .on_press(Message::Reload)
-                .style(theme::ghost_btn)
-                .padding([6, 12]),
-        );
 
-        container(
-            row![title, Space::with_width(Length::Fill), right]
-                .align_y(Alignment::Center)
-                .padding([14, 20]),
-        )
+        let reload = button(text("Reload").size(13))
+            .on_press(Message::Reload)
+            .style(theme::ghost_btn)
+            .padding([6, 12]);
+
+        let header = row![title, Space::with_width(Length::Fill), reload]
+            .align_y(Alignment::Center);
+
+        // Platforms without sensors (Windows) get no second row at all.
+        let inner: Element<'_, Message> = if pills.is_empty() {
+            header.into()
+        } else {
+            column![
+                header,
+                Row::with_children(pills)
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            ]
+            .spacing(12)
+            .into()
+        };
+
+        container(inner)
+        .padding([14, 20])
         .style(theme::topbar)
         .width(Length::Fill)
         .into()

@@ -11,7 +11,7 @@ A power management GUI and D-Bus daemon for the ASUS ProArt PX13 (AMD Strix Halo
 - **Named profiles** — save and restore any combination of PPT limits and fan curve to `~/.config/strixctl/profiles.json`
 - **Live temperature and clocks** — background watcher updates the UI every second (CPU/GPU temps, fan RPM, fastest core frequency, battery draw and time left); auto-switches to Performance at ≥ 95 °C
 - **D-Bus daemon** (`strixctld`) — exposes profiles and controls over a session bus interface
-- **GNOME Shell extension** — Quick Settings panel with profile picker, a configurable cycle keybinding (default `Super+P`), and a top-bar pill showing any combination of CPU frequency, power draw, and battery time left
+- **GNOME Shell extension** — Quick Settings panel with profile picker, a configurable cycle keybinding (default `Super+P`), and a right-aligned top-bar pill showing any combination of CPU frequency, power draw, and battery time left
 
 ## Requirements
 
@@ -191,7 +191,8 @@ On the ProArt PX13, `Fn+Q` typically reports as `XF86Launch1`.
 
 ## GNOME panel pill
 
-The extension can show a live readout in the top bar next to the clock. Configure
+The extension can show a live readout at the right of the top bar, before the
+system indicators. Configure
 it in the extension preferences, or with gsettings:
 
 ```sh

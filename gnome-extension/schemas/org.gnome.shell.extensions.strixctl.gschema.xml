@@ -17,7 +17,8 @@
       <default>true</default>
       <summary>Show the panel pill</summary>
       <description>
-        Shows a small readout in the top bar, next to the clock. Its contents
+        Shows a small readout at the right of the top bar, before the system
+        indicators. Its contents
         are selected with the pill-show-* keys below; the pill hides itself when
         none of them is enabled.
       </description>

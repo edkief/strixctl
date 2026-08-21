@@ -236,7 +236,7 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
 
 // ── Panel pill (metrics next to the clock) ───────────────────────────────
 //
-// A plain label in the panel's centre box, right after the clock. What it shows
+// A plain label at the left of the panel's right-hand box. What it shows
 // is chosen in prefs: CPU frequency, battery power draw, remaining battery time,
 // or any combination. Values arrive through the daemon's MetricsChanged signal
 // (at most 1 Hz), with the D-Bus properties used for the initial paint.
@@ -369,11 +369,11 @@ export default class StrixCtlExtension extends Extension {
         this._indicator = new StrixCtlIndicator(this._proxy);
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
 
-        // Panel pill, in the centre box just after the clock. Index 1 puts it to
-        // the right of the date menu, which always sits at index 0 there.
+        // Panel pill, at the left edge of the right-hand status area — right
+        // next to the system indicators rather than beside the clock.
         this._settings = this.getSettings();
         this._pill = new StrixCtlPill(this._proxy, this._settings);
-        Main.panel.addToStatusArea('strixctl-pill', this._pill, 1, 'center');
+        Main.panel.addToStatusArea('strixctl-pill', this._pill, 0, 'right');
 
         // Hotkey: default <Super>p, configurable in prefs or via gsettings.
         // On ASUS ROG laptops, Fn+Q may report as XF86Launch1 — set that in prefs.

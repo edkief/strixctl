@@ -102,7 +102,7 @@ Bus `com.strixctl.Service`, path `/com/strixctl/Service`, **session bus** (activ
 The interface XML is duplicated in [gnome-extension/extension.js](gnome-extension/extension.js) — changing a member means editing both, then `make install-extension` and reloading GNOME Shell.
 
 ### GNOME extension surface
-Two pieces share one proxy: the Quick Settings toggle (profile list, apply, cycle keybinding) and `StrixCtlPill`, a `PanelMenu.Button` added at index 1 of the panel's **centre** box so it sits directly right of the clock. The pill renders whatever `pill-show-freq` / `pill-show-power` / `pill-show-battery` select and hides itself when `pill-enabled` is off or nothing is selected. New settings keys need three edits: the gschema, `prefs.js`, and the pill's `_updateLabel`; the schema is recompiled by `make install-extension`.
+Two pieces share one proxy: the Quick Settings toggle (profile list, apply, cycle keybinding) and `StrixCtlPill`, a `PanelMenu.Button` added at index 0 of the panel's **right** box so it sits just left of the system indicators. The pill renders whatever `pill-show-freq` / `pill-show-power` / `pill-show-battery` select and hides itself when `pill-enabled` is off or nothing is selected. New settings keys need three edits: the gschema, `prefs.js`, and the pill's `_updateLabel`; the schema is recompiled by `make install-extension`.
 
 ### Persistence
 `~/.config/strixctl/profiles.json` (`%APPDATA%\strixctl` on Windows) plus an `active-profile` file naming the last applied one. The daemon re-reads the JSON on **every** `ApplySavedProfile`, so GUI edits need no daemon restart. New `SavedProfile` fields must carry `#[serde(default …)]` — old files are loaded with `unwrap_or_default()` and a parse failure silently wipes the list.
