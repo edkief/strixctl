@@ -3,7 +3,11 @@ import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
 import Adw from 'gi://Adw';
-import {ExtensionPreferences} from 'resource:///org/gnome/shell/extensions/prefs.js';
+// Prefs run in the gnome-extensions prefs process, not in gnome-shell, so this
+// comes from the org.gnome.Shell.Extensions gresource — note the capital S and
+// the js/extensions/ segment. The lowercase shell/extensions/ path only exists
+// inside the shell process (that's where extension.js gets its imports).
+import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 export default class StrixCtrlPrefs extends ExtensionPreferences {
     fillPreferencesWindow(window) {
