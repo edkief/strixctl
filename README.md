@@ -1,6 +1,6 @@
 # strixctl
 
-A power management GUI and D-Bus daemon for the ASUS ProArt PX13 (AMD Strix Halo) on Linux. Provides a native egui interface and GNOME Shell integration for switching platform profiles, tuning AMD CPU power limits (PPT), and editing fan curves — without running anything as root.
+A power management GUI and D-Bus daemon for the ASUS ProArt PX13 (AMD Strix Halo) on Linux. Provides a native iced interface and GNOME Shell integration for switching platform profiles, tuning AMD CPU power limits (PPT), and editing fan curves — without running anything as root.
 
 ## Features
 
@@ -61,7 +61,8 @@ a real Windows path:
   applying a fan curve also applies the mapped plan. atrofac is set-only, so the
   current plan/curve can't be read back into the UI.
 - Applying a saved profile chains several elevated tools (atrofac plan + fan,
-  ryzenadj, bcdedit), each with its own UAC prompt.
+  ryzenadj, bcdedit), but they are batched into one elevated script so you get a
+  single UAC prompt. Individual controls still prompt one by one.
 - Profiles are stored in `%APPDATA%\strixctl\profiles.json`.
 - Reading current PPT values (`ryzenadj --info`) also needs elevation, so it only
   happens when you click **Reload**, never automatically at startup.
@@ -100,7 +101,7 @@ This installs `com.strixctl.ryzenadj.policy`, which allows `ryzenadj` to run via
 make install-daemon
 ```
 
-Builds `strixctld` with `cargo install` and writes the D-Bus session activation file so the bus auto-starts the daemon on first use.
+Installs the `strixctld` release binary into `~/.cargo/bin` and writes the D-Bus session activation file so the bus auto-starts the daemon on first use. Build it first with `make build` (or `make build-daemon`).
 
 ### 3. Install the systemd user service (optional)
 
@@ -150,11 +151,22 @@ Object path: `/com/strixctl/Service`
 | Member | Type | Description |
 |--------|------|-------------|
 | `ListSavedProfiles` | method → `as` | Names of all saved profiles |
-| `ApplySavedProfile(name: s)` | method | Apply fan curve then PPT (800 ms apart) |
+| `ApplySavedProfile(name: s)` | method | Platform profile, fan curve, then PPT (800 ms apart), boost, core preset |
 | `SetAsusProfile(profile: s)` | method | `quiet` / `balanced` / `performance` |
 | `ApplyPpt(apu, fast, slow: u)` | method | Set PPT limits in mW directly |
+| `SetBoost(enabled: b)` | method | CPU boost on/off |
+| `SetCorePreset(preset: u)` | method | Active physical cores: `4` / `8` / `12` / `16` |
+| `NotifyProfileApplied(name: s)` | method | Told by the GUI which saved profile it just applied |
 | `CurrentTempC` | property `d` | Live CPU package temperature |
+| `CurrentPlatformProfile` | property `s` | Platform profile as last read from asusctl |
+| `CurrentSavedProfile` | property `s` | Name of the active saved profile |
+| `BoostEnabled` | property `b` | CPU boost state |
+| `ActiveCorePreset` | property `u` | Active physical core count |
 | `TempChanged(temp: d)` | signal | Emitted when temp shifts by > 0.5 °C |
+| `PlatformProfileChanged(profile: s)` | signal | Platform profile changed (including by another process) |
+| `SavedProfileChanged(name: s)` | signal | Active saved profile changed |
+| `BoostChanged(enabled: b)` | signal | Boost state changed |
+| `CorePresetChanged(preset: u)` | signal | Core preset changed |
 
 ## GNOME extension keybinding
 
