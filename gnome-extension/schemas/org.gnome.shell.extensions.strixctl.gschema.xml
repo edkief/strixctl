@@ -13,5 +13,38 @@
       </description>
     </key>
 
+    <key name="pill-enabled" type="b">
+      <default>true</default>
+      <summary>Show the panel pill</summary>
+      <description>
+        Shows a small readout in the top bar, next to the clock. Its contents
+        are selected with the pill-show-* keys below; the pill hides itself when
+        none of them is enabled.
+      </description>
+    </key>
+
+    <key name="pill-show-freq" type="b">
+      <default>true</default>
+      <summary>Pill shows CPU frequency</summary>
+      <description>Fastest live core frequency, in GHz.</description>
+    </key>
+
+    <key name="pill-show-power" type="b">
+      <default>true</default>
+      <summary>Pill shows power draw</summary>
+      <description>
+        Battery discharge in watts, or "AC" while running on mains.
+      </description>
+    </key>
+
+    <key name="pill-show-battery" type="b">
+      <default>false</default>
+      <summary>Pill shows battery time left</summary>
+      <description>
+        Estimated remaining battery time (h:mm) at the current draw, or "AC"
+        while running on mains.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

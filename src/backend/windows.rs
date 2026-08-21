@@ -1,9 +1,11 @@
 //! Windows backend.
 //!
-//! Implements the two features that have a real Windows path:
+//! Implements the features that have a real Windows path:
 //!   * AMD PPT tuning via `ryzenadj.exe` (identical CLI to Linux), run elevated.
 //!   * Active-core-count control via `bcdedit /set {current} numproc N`, which
 //!     only takes effect after a reboot (tracked so the UI can warn the user).
+//!   * Max CPU frequency via the `PROCFREQMAX` power-plan setting (`powercfg`),
+//!     the Windows equivalent of the Linux cpufreq cap.
 //!
 //! Everything else (asusctl platform profiles & fan curves, sysfs boost/SMT,
 //! temperatures) has no Windows equivalent and is exposed here as a harmless
@@ -136,6 +138,62 @@ fn clear_pending_cores() {
     let _ = std::fs::remove_file(pending_path());
 }
 
+// ---------- Max CPU frequency via powercfg ----------
+//
+// PROCFREQMAX is the power-plan "Maximum processor frequency" setting, in MHz,
+// where 0 means unlimited. It is the closest Windows equivalent to writing
+// cpufreq's scaling_max_freq on Linux. Note that the value lives on the active
+// power *plan*, so switching plans (which `apply_profile` does through atrofac)
+// can change which cap is in force.
+
+/// Applies a max-frequency cap. `None` removes the cap (PROCFREQMAX = 0).
+///
+/// AC and DC values are both set so the cap holds on battery and on mains, then
+/// the scheme is re-activated because powercfg only commits changes on
+/// `/setactive`. All three run in one elevated `cmd` line = one UAC prompt.
+pub fn set_max_freq_khz(khz: Option<u32>) -> Result<(), String> {
+    let mhz = khz.map(|k| (k as f32 / 1000.0).round() as u32).unwrap_or(0);
+    let cmd = format!(
+        "/c powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCFREQMAX {mhz} && \
+         powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCFREQMAX {mhz} && \
+         powercfg /setactive SCHEME_CURRENT"
+    );
+    run_elevated(OsStr::new("cmd.exe"), &cmd)?;
+    write_last_max_freq(khz);
+    Ok(())
+}
+
+/// Returns the last cap this app applied. Querying powercfg for the live value
+/// needs elevation and output parsing for no real benefit, so the UI shows what
+/// we last set instead (see `platform::MAX_FREQ_READBACK`).
+pub fn read_max_freq_khz() -> Option<u32> {
+    std::fs::read_to_string(max_freq_path()).ok()?.trim().parse().ok()
+}
+
+/// Windows exposes no reliable min/max frequency pair to bound the input with.
+pub fn read_freq_range_khz() -> Option<(u32, u32)> {
+    None
+}
+
+fn max_freq_path() -> PathBuf {
+    crate::profiles::config_dir().join("max-freq-khz")
+}
+
+fn write_last_max_freq(khz: Option<u32>) {
+    let path = max_freq_path();
+    match khz {
+        Some(k) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, k.to_string());
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 // ---------- Power plan & fan curve via atrofac-cli ----------
 //
 // atrofac drives the ASUS Armoury Crate WMI interface. Its `fan` command sets a
@@ -238,11 +296,28 @@ pub fn apply_saved(saved: &SavedProfile) -> Result<(), String> {
         ),
     };
 
+    // The frequency cap is part of the power plan, so it must be written after
+    // atrofac has switched plans — otherwise the plan switch discards it.
+    let freq_line = match saved.max_freq_khz {
+        Some(khz) => {
+            let mhz = (khz as f32 / 1000.0).round() as u32;
+            format!(
+                "powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCFREQMAX {mhz} >> \"{log}\" 2>&1 || exit /b 4\r\n\
+                 powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCFREQMAX {mhz} >> \"{log}\" 2>&1 || exit /b 4\r\n\
+                 powercfg /setactive SCHEME_CURRENT >> \"{log}\" 2>&1 || exit /b 4",
+                log = log.display(),
+            )
+        }
+        // No cap stored in the profile: leave whatever the plan defines alone.
+        None => "rem no frequency cap in profile".to_string(),
+    };
+
     let script = format!(
         "@echo off\r\n\
          \"{atro}\" fan --plan {plan} --cpu {curve} --gpu {curve} >> \"{log}\" 2>&1 || exit /b 1\r\n\
          \"{ryz}\" --stapm-limit={apu} --fast-limit={fast} --slow-limit={slow} --apu-slow-limit={apu} >> \"{log}\" 2>&1 || exit /b 2\r\n\
-         {bcd}\r\n",
+         {bcd}\r\n\
+         {freq}\r\n",
         atro = atrofac.display(),
         ryz = ryzenadj.display(),
         log = log.display(),
@@ -250,6 +325,7 @@ pub fn apply_saved(saved: &SavedProfile) -> Result<(), String> {
         fast = ppt.fast_limit,
         slow = ppt.slow_limit,
         bcd = bcd_line,
+        freq = freq_line,
     );
     std::fs::write(&bat, script).map_err(|e| format!("write batch file: {e}"))?;
 
@@ -261,11 +337,15 @@ pub fn apply_saved(saved: &SavedProfile) -> Result<(), String> {
         0 => {
             // All steps ran, including bcdedit — the core change is now pending.
             write_pending_cores(saved.core_preset.as_u32());
+            if saved.max_freq_khz.is_some() {
+                write_last_max_freq(saved.max_freq_khz);
+            }
             Ok(())
         }
         1 => Err(step_error("power plan / fan curve (atrofac)", &log)),
         2 => Err(step_error("power limits (ryzenadj)", &log)),
         3 => Err(step_error("core preset (bcdedit)", &log)),
+        4 => Err(step_error("max frequency (powercfg)", &log)),
         c => Err(format!("apply failed (exit code {c})")),
     };
     let _ = std::fs::remove_file(&log);

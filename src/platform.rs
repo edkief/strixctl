@@ -19,6 +19,17 @@ pub const SUPPORTS_SMT: bool = cfg!(unix);
 /// CPU/GPU temperature monitoring via sysfs hwmon/thermal. Linux only.
 pub const SUPPORTS_TEMP: bool = cfg!(unix);
 
+/// Max CPU frequency cap — cpufreq (`cpupower frequency-set -u`, sysfs
+/// fallback) on Linux, the `PROCFREQMAX` power-plan setting via `powercfg` on
+/// Windows.
+pub const SUPPORTS_MAX_FREQ: bool = true;
+/// Whether the current frequency cap can be read back. Linux exposes it in
+/// sysfs; `powercfg` is effectively set-only for our purposes, so on Windows the
+/// UI shows the last value the user applied rather than live state.
+pub const MAX_FREQ_READBACK: bool = cfg!(unix);
+/// Live CPU frequency display via sysfs cpufreq. Linux only.
+pub const SUPPORTS_FREQ_DISPLAY: bool = cfg!(unix);
+
 /// AMD PPT tuning via ryzenadj — available on both Linux and Windows.
 pub const SUPPORTS_PPT: bool = true;
 /// Active-core-count control — sysfs hotplug on Linux, `bcdedit numproc` on Windows.

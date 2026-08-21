@@ -180,6 +180,12 @@ fn cpu_card(app: &App) -> Element<'_, Message> {
             Message::ApplySmt,
         ));
     }
+    if platform::SUPPORTS_MAX_FREQ {
+        if !items.is_empty() {
+            items.push(divider());
+        }
+        items.push(max_freq_row(app));
+    }
     if platform::SUPPORTS_CORE_PRESET {
         if !items.is_empty() {
             items.push(divider());
@@ -201,13 +207,80 @@ fn cpu_card(app: &App) -> Element<'_, Message> {
     }
 
     let card_hint = if platform::SUPPORTS_BOOST {
-        "Boost, SMT, and core-count controls. Apply SMT before changing the \
-         core preset — sibling threads vanish from sysfs when SMT is off."
+        "Boost, SMT, frequency cap, and core-count controls. Apply SMT before \
+         changing the core preset — sibling threads vanish from sysfs when SMT \
+         is off."
     } else {
-        "Active core-count control via bcdedit (requires a reboot to apply)."
+        "Frequency cap (powercfg) and active core count (bcdedit, requires a reboot)."
     };
 
     card_section("CPU", card_hint, Column::with_children(items).spacing(0))
+}
+
+/// Max-frequency cap: a toggler that engages the cap plus an MHz input.
+///
+/// The whole row is inert when the platform can read a frequency range but
+/// didn't find one (no cpufreq sysfs) — the control stays visible and greyed so
+/// it's clear the feature exists but this machine can't do it.
+fn max_freq_row(app: &App) -> Element<'_, Message> {
+    let range = app.state.freq_range_khz;
+    let unavailable = platform::MAX_FREQ_READBACK && range.is_none();
+    let capped = app.max_freq_capped;
+
+    let hint = if unavailable {
+        "Unavailable — this system exposes no cpufreq scaling range.".to_string()
+    } else if let Some((lo, hi)) = range {
+        match app.state.max_freq_khz {
+            Some(k) => format!(
+                "Capped at {} MHz (hardware {}–{} MHz). Applied with cpupower / scaling_max_freq.",
+                k / 1000,
+                lo / 1000,
+                hi / 1000
+            ),
+            None => format!(
+                "Uncapped (hardware {}–{} MHz). Applied with cpupower / scaling_max_freq.",
+                lo / 1000,
+                hi / 1000
+            ),
+        }
+    } else {
+        "Sets the power plan's maximum processor frequency (powercfg PROCFREQMAX)."
+            .to_string()
+    };
+
+    let mut toggle = toggler(capped).size(22);
+    let mut input = text_input("MHz", &app.max_freq_str)
+        .style(theme::input)
+        .padding([6, 10])
+        .size(14)
+        .width(Length::Fixed(90.0));
+    let mut apply = button(text("Apply").size(13))
+        .style(theme::ghost_btn)
+        .padding([6, 14]);
+
+    if !unavailable {
+        toggle = toggle.on_toggle(Message::MaxFreqCapToggled);
+        apply = apply.on_press(Message::ApplyMaxFreq);
+        if capped {
+            input = input.on_input(Message::MaxFreqChanged);
+        }
+    }
+
+    row![
+        column![
+            text("Max CPU Frequency").size(14).color(theme::TEXT),
+            text(hint).size(11).color(theme::OVERLAY1),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        toggle,
+        input,
+        text("MHz").size(12).color(theme::SUBTEXT0),
+        apply,
+    ]
+    .align_y(Alignment::Center)
+    .spacing(10)
+    .into()
 }
 
 fn reboot_banner<'a>() -> Element<'a, Message> {

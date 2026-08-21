@@ -9,6 +9,12 @@ pub struct SensorReading {
     /// Battery power draw in watts while discharging; `None` when on AC or when
     /// no battery power sensor is available.
     pub battery_discharge_w: Option<f32>,
+    /// Highest live core frequency in MHz. Cores clock independently, so the
+    /// maximum across them is the closest single number to "current CPU speed".
+    pub cpu_freq_mhz: Option<u32>,
+    /// Estimated minutes of battery left at the current draw; `None` on AC or
+    /// when the battery exposes no usable energy/power pair.
+    pub battery_minutes_left: Option<u32>,
 }
 
 pub fn read_now() -> SensorReading {
@@ -21,6 +27,8 @@ pub fn read_now() -> SensorReading {
             cpu_fan_rpm,
             gpu_fan_rpm,
             battery_discharge_w: read_battery_discharge_w(),
+            cpu_freq_mhz: read_cpu_freq_mhz(),
+            battery_minutes_left: read_battery_minutes_left(),
         }
     }
 
@@ -34,8 +42,74 @@ pub fn read_now() -> SensorReading {
             cpu_fan_rpm: None,
             gpu_fan_rpm: None,
             battery_discharge_w: None,
+            cpu_freq_mhz: None,
+            battery_minutes_left: None,
         }
     }
+}
+
+/// Highest `scaling_cur_freq` across all cpufreq policies, in MHz. Falls back to
+/// the largest "cpu MHz" line in /proc/cpuinfo on kernels without cpufreq sysfs.
+#[cfg(unix)]
+fn read_cpu_freq_mhz() -> Option<u32> {
+    let mut best_khz: u32 = 0;
+    if let Ok(dir) = fs::read_dir("/sys/devices/system/cpu/cpufreq") {
+        for entry in dir.flatten() {
+            let name = entry.file_name();
+            if !name.to_string_lossy().starts_with("policy") {
+                continue;
+            }
+            // Offline policies keep the file but reading it can fail; skip those.
+            if let Some(khz) = fs::read_to_string(entry.path().join("scaling_cur_freq"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                best_khz = best_khz.max(khz);
+            }
+        }
+    }
+    if best_khz > 0 {
+        return Some((best_khz as f32 / 1000.0).round() as u32);
+    }
+
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").ok()?;
+    let best_mhz = cpuinfo
+        .lines()
+        .filter(|l| l.to_lowercase().starts_with("cpu mhz"))
+        .filter_map(|l| l.split(':').nth(1)?.trim().parse::<f32>().ok())
+        .fold(0.0f32, f32::max);
+    (best_mhz > 0.0).then(|| best_mhz.round() as u32)
+}
+
+/// Minutes of battery left at the current discharge rate, from `energy_now`
+/// (µWh) / `power_now` (µW), or the charge/current equivalent. Returns `None`
+/// unless a battery is actually discharging.
+#[cfg(unix)]
+fn read_battery_minutes_left() -> Option<u32> {
+    let dir = fs::read_dir("/sys/class/power_supply").ok()?;
+    for entry in dir.flatten() {
+        let base = entry.path();
+        let read = |f: &str| fs::read_to_string(base.join(f)).ok();
+        let parse = |s: Option<String>| s.and_then(|v| v.trim().parse::<f32>().ok());
+
+        if read("type").map(|t| t.trim().to_string()).as_deref() != Some("Battery") {
+            continue;
+        }
+        if read("status").map(|s| s.trim().to_string()).as_deref() != Some("Discharging") {
+            continue;
+        }
+
+        // energy/power (Wh, W) and charge/current (Ah, A) both give hours.
+        let hours = match (parse(read("energy_now")), parse(read("power_now"))) {
+            (Some(e), Some(p)) if p > 0.0 => e / p,
+            _ => match (parse(read("charge_now")), parse(read("current_now"))) {
+                (Some(c), Some(i)) if i > 0.0 => c / i,
+                _ => continue,
+            },
+        };
+        return Some((hours * 60.0).round().clamp(0.0, 6000.0) as u32);
+    }
+    None
 }
 
 #[cfg(unix)]

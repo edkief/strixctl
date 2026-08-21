@@ -4,9 +4,10 @@
 //! com.strixctl.cpuctl (polkit/com.strixctl.cpuctl.policy).
 //!
 //! Usage:
-//!   strixctl-cpuctl boost <0|1>
-//!   strixctl-cpuctl cores <4|8|12|16>
-//!   strixctl-cpuctl smt   <0|1>
+//!   strixctl-cpuctl boost   <0|1>
+//!   strixctl-cpuctl cores   <4|8|12|16>
+//!   strixctl-cpuctl smt     <0|1>
+//!   strixctl-cpuctl maxfreq <kHz|max>
 //!
 //! SMT is controlled globally via /sys/devices/system/cpu/smt/control (on|off).
 //! When SMT is off, sibling threads (cpu16-31) are absent from sysfs, so
@@ -41,16 +42,19 @@ fn main() {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: strixctl-cpuctl boost <0|1>");
-        eprintln!("       strixctl-cpuctl cores <4|8|12|16>");
+        eprintln!("usage: strixctl-cpuctl boost   <0|1>");
+        eprintln!("       strixctl-cpuctl cores   <4|8|12|16>");
+        eprintln!("       strixctl-cpuctl smt     <0|1>");
+        eprintln!("       strixctl-cpuctl maxfreq <kHz|max>");
         process::exit(1);
     }
 
     let result = match args[1].as_str() {
-        "boost" => cmd_boost(&args[2]),
-        "cores" => cmd_cores(&args[2]),
-        "smt"   => cmd_smt(&args[2]),
-        other   => Err(format!("unknown command '{other}'")),
+        "boost"   => cmd_boost(&args[2]),
+        "cores"   => cmd_cores(&args[2]),
+        "smt"     => cmd_smt(&args[2]),
+        "maxfreq" => cmd_maxfreq(&args[2]),
+        other     => Err(format!("unknown command '{other}'")),
     };
 
     if let Err(e) = result {
@@ -144,6 +148,103 @@ fn cmd_smt(value: &str) -> Result<(), String> {
         _ => return Err(format!("smt: expected 0 or 1, got '{value}'")),
     };
     write_sysfs("/sys/devices/system/cpu/smt/control", v)
+}
+
+/// Caps the maximum CPU frequency. `value` is a frequency in kHz, or "max" to
+/// restore the hardware maximum.
+///
+/// Prefers `cpupower frequency-set -u`, which applies the limit to every policy
+/// through the kernel's own tooling; falls back to writing `scaling_max_freq`
+/// directly when cpupower is not installed (it ships in a separate package on
+/// most distributions, and the sysfs write is exactly what it does anyway).
+#[cfg(unix)]
+fn cmd_maxfreq(value: &str) -> Result<(), String> {
+    let khz = if value.eq_ignore_ascii_case("max") {
+        // The hardware ceiling, which already reflects the current boost state.
+        read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+            .ok_or_else(|| "maxfreq: cannot read cpuinfo_max_freq".to_string())?
+    } else {
+        let khz: u32 = value
+            .parse()
+            .map_err(|_| format!("maxfreq: expected a frequency in kHz or 'max', got '{value}'"))?;
+        let hw_min = read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq");
+        let hw_max = read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
+        match (hw_min, hw_max) {
+            // Clamp rather than reject: an out-of-range write fails per policy
+            // and would leave the CPUs in a half-applied state.
+            (Some(lo), Some(hi)) => khz.clamp(lo, hi),
+            _ => khz,
+        }
+    };
+
+    if cpupower_set_max(khz).is_ok() {
+        return Ok(());
+    }
+    write_scaling_max_freq(khz)
+}
+
+#[cfg(unix)]
+fn read_khz(path: &str) -> Option<u32> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// `cpupower frequency-set -u <khz>` — bare numbers are kHz. Errors (including
+/// "not installed") are returned so the caller can fall back to sysfs.
+#[cfg(unix)]
+fn cpupower_set_max(khz: u32) -> Result<(), String> {
+    let out = process::Command::new("cpupower")
+        .args(["frequency-set", "-u", &khz.to_string()])
+        .output()
+        .map_err(|e| format!("cpupower: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Writes `scaling_max_freq` on every cpufreq policy. Offline policies and
+/// policies that reject the value are collected rather than aborting, so one
+/// failing CPU doesn't leave the rest untouched.
+#[cfg(unix)]
+fn write_scaling_max_freq(khz: u32) -> Result<(), String> {
+    let dir = fs::read_dir("/sys/devices/system/cpu/cpufreq")
+        .map_err(|e| format!("maxfreq: no cpufreq sysfs: {e}"))?;
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut written = 0usize;
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("policy") {
+            continue;
+        }
+        let path = entry.path().join("scaling_max_freq");
+        if !path.exists() {
+            continue;
+        }
+        match fs::write(&path, khz.to_string()) {
+            Ok(()) => written += 1,
+            Err(e) => errors.push(format!("{name}: {e}")),
+        }
+    }
+
+    // Failures are usually identical across all 32 policies (permissions, or a
+    // value the driver rejects), so report a count and one example instead of
+    // pasting the same message dozens of times into the GUI status bar.
+    if written == 0 {
+        return Err(match errors.first() {
+            None => "maxfreq: no cpufreq policies found".to_string(),
+            Some(first) => format!("maxfreq: all {} policies failed ({first})", errors.len()),
+        });
+    }
+    match errors.first() {
+        None => Ok(()),
+        Some(first) => Err(format!(
+            "maxfreq: applied to {written} policies, {} failed ({first})",
+            errors.len()
+        )),
+    }
 }
 
 #[cfg(unix)]

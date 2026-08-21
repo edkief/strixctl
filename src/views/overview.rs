@@ -49,6 +49,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ));
     }
 
+    if platform::SUPPORTS_FREQ_DISPLAY {
+        let value = app
+            .state
+            .current_cpu_freq_mhz
+            .map(|mhz| format!("{:.2} GHz", mhz as f32 / 1000.0))
+            .unwrap_or_else(|| "—".to_string());
+        let hint = match app.state.max_freq_khz {
+            Some(khz) => format!("fastest core · capped {} MHz", khz / 1000),
+            None => "fastest core · uncapped".to_string(),
+        };
+        tiles.push(kpi_owned("CPU Freq", value, theme::SKY, hint));
+    }
+
     if platform::SUPPORTS_PPT {
         let watts = (app.state.ppt.apu_limit as f32) / 1000.0;
         tiles.push(kpi(
@@ -82,6 +95,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if platform::SUPPORTS_SMT {
         let smt_label = if app.state.smt_enabled { "On" } else { "Off" };
         rows.push(summary_row("SMT (sibling threads)", smt_label.to_string()));
+    }
+    if platform::SUPPORTS_FREQ_DISPLAY || platform::SUPPORTS_MAX_FREQ {
+        let mut badges = Vec::new();
+        if platform::SUPPORTS_FREQ_DISPLAY {
+            let (label, color) = match app.state.current_cpu_freq_mhz {
+                Some(mhz) => (format!("now  {} MHz", mhz), theme::SKY),
+                None => ("now  —".to_string(), theme::OVERLAY1),
+            };
+            badges.push(badge(label, color));
+        }
+        if platform::SUPPORTS_MAX_FREQ {
+            let (label, color) = match app.state.max_freq_khz {
+                Some(khz) => (format!("cap  {} MHz", khz / 1000), theme::PEACH),
+                None => ("cap  off".to_string(), theme::OVERLAY1),
+            };
+            badges.push(badge(label, color));
+        }
+        rows.push(summary_row_badges("CPU frequency", badges));
     }
     if platform::SUPPORTS_CORE_PRESET {
         rows.push(summary_row("Active cores", preset_label));
@@ -134,6 +165,24 @@ fn reboot_banner<'a>() -> Element<'a, Message> {
     )
     .style(theme::pill(theme::PEACH))
     .padding([6, 12])
+    .into()
+}
+
+/// Same tile as `kpi`, but for hints built at call time rather than static text.
+fn kpi_owned<'a>(label: &'a str, value: String, accent: Color, hint: String) -> Element<'a, Message> {
+    container(
+        column![
+            text(label).size(12).color(theme::SUBTEXT0),
+            Space::with_height(4),
+            text(value).size(28).color(accent),
+            Space::with_height(2),
+            text(hint).size(11).color(theme::OVERLAY0),
+        ]
+        .spacing(0)
+        .padding(18),
+    )
+    .style(theme::kpi_tile)
+    .width(Length::Fill)
     .into()
 }
 

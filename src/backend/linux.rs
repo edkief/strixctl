@@ -190,6 +190,65 @@ pub fn set_core_preset(preset: &CorePreset) -> Result<(), String> {
     ])
 }
 
+/// Reads the hardware frequency range (min, max) in kHz from cpufreq.
+///
+/// `cpuinfo_max_freq` is the ceiling the kernel accepts for `scaling_max_freq`,
+/// and it already tracks the boost state (with amd-pstate it drops to the
+/// nominal clock when boost is off), so it is the right bound for the UI.
+pub fn read_freq_range_khz() -> Option<(u32, u32)> {
+    let read = |f: &str| -> Option<u32> {
+        std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu0/cpufreq/{f}"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    let min = read("cpuinfo_min_freq")?;
+    let max = read("cpuinfo_max_freq")?;
+    (min < max).then_some((min, max))
+}
+
+/// Reads the active max-frequency cap in kHz: the highest `scaling_max_freq`
+/// across policies. Returns `None` when it equals the hardware maximum, which
+/// is how "uncapped" is represented throughout the app.
+pub fn read_max_freq_khz() -> Option<u32> {
+    let mut best: u32 = 0;
+    if let Ok(dir) = std::fs::read_dir("/sys/devices/system/cpu/cpufreq") {
+        for entry in dir.flatten() {
+            if !entry.file_name().to_string_lossy().starts_with("policy") {
+                continue;
+            }
+            if let Some(khz) = std::fs::read_to_string(entry.path().join("scaling_max_freq"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                best = best.max(khz);
+            }
+        }
+    }
+    if best == 0 {
+        return None;
+    }
+    match read_freq_range_khz() {
+        Some((_, hw_max)) if best >= hw_max => None,
+        _ => Some(best),
+    }
+}
+
+/// Sets the max CPU frequency cap via the privileged helper. `None` removes the
+/// cap (restores the hardware maximum).
+pub fn set_max_freq_khz(khz: Option<u32>) -> Result<(), String> {
+    let value = match khz {
+        Some(k) => k.to_string(),
+        None => "max".to_string(),
+    };
+    run_cmd("pkexec", &[
+        "/usr/local/bin/strixctl-cpuctl",
+        "maxfreq",
+        &value,
+    ])
+}
+
 pub fn read_current_profile() -> Option<Profile> {
     let out = Command::new("asusctl").arg("profile").arg("get").output().ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);

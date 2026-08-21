@@ -82,6 +82,12 @@ pub enum Message {
     ApplyCorePreset,
     CorePresetApplied(Result<CorePreset, String>),
 
+    // Max frequency cap
+    MaxFreqCapToggled(bool),
+    MaxFreqChanged(String),
+    ApplyMaxFreq,
+    MaxFreqApplied(Result<Option<u32>, String>),
+
     // Saved profiles
     NewProfileNameChanged(String),
     SaveProfile,
@@ -100,6 +106,11 @@ pub struct App {
     pub ppt_slow_str: String,
     pub ppt_fast_str: String,
     pub hyst_str: String,
+    /// Max-frequency input, in MHz (kHz is the storage unit, MHz is what users
+    /// think in). Only meaningful while `max_freq_capped` is true.
+    pub max_freq_str: String,
+    /// Whether the cap is engaged. False means "run at the hardware maximum".
+    pub max_freq_capped: bool,
     pub shift_input: String,
     pub fan_view_temp: (f32, f32),
     pub ppt_reload_inflight: bool,
@@ -133,6 +144,16 @@ impl App {
         }
         state.core_preset = backend::read_core_preset();
         state.core_reboot_pending = backend::core_reboot_pending();
+        state.freq_range_khz = backend::read_freq_range_khz();
+        state.max_freq_khz = backend::read_max_freq_khz();
+        state.current_cpu_freq_mhz = watcher::read_now().cpu_freq_mhz;
+
+        let max_freq_capped = state.max_freq_khz.is_some();
+        // Seed the input with the hardware maximum when uncapped, so engaging
+        // the cap starts from a sane value instead of an empty field.
+        let max_freq_str = khz_to_mhz_string(
+            state.max_freq_khz.or(state.freq_range_khz.map(|(_, hi)| hi)),
+        );
 
         let fan_view_temp = fit_fan_view(&state.fan_curve.points);
         let ppt_apu_str = state.ppt.apu_limit.to_string();
@@ -153,6 +174,8 @@ impl App {
                 ppt_slow_str,
                 ppt_fast_str,
                 hyst_str,
+                max_freq_str,
+                max_freq_capped,
                 shift_input: String::new(),
                 fan_view_temp,
                 ppt_reload_inflight: false,
@@ -182,6 +205,8 @@ impl App {
                 self.state.current_cpu_fan_rpm = r.cpu_fan_rpm;
                 self.state.current_gpu_fan_rpm = r.gpu_fan_rpm;
                 self.state.current_battery_discharge_w = r.battery_discharge_w;
+                self.state.current_battery_minutes_left = r.battery_minutes_left;
+                self.state.current_cpu_freq_mhz = r.cpu_freq_mhz;
                 // Auto-safety
                 if r.temp_c > 95.0 && self.state.profile != Profile::Performance {
                     self.state.profile = Profile::Performance;
@@ -220,6 +245,10 @@ impl App {
                 }
                 self.state.core_preset = backend::read_core_preset();
                 self.state.core_reboot_pending = backend::core_reboot_pending();
+                self.state.freq_range_khz = backend::read_freq_range_khz();
+                if platform::MAX_FREQ_READBACK {
+                    self.set_max_freq(backend::read_max_freq_khz());
+                }
                 self.set_status("Settings reloaded from system.");
                 Task::none()
             }
@@ -456,6 +485,49 @@ impl App {
                 Task::none()
             }
 
+            Message::MaxFreqCapToggled(on) => {
+                self.max_freq_capped = on;
+                if on && self.max_freq_str.trim().is_empty() {
+                    self.max_freq_str =
+                        khz_to_mhz_string(self.state.freq_range_khz.map(|(_, hi)| hi));
+                }
+                Task::none()
+            }
+            Message::MaxFreqChanged(v) => {
+                self.max_freq_str = v;
+                Task::none()
+            }
+            Message::ApplyMaxFreq => {
+                let target = match self.parse_max_freq_khz() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.set_status(&e);
+                        return Task::none();
+                    }
+                };
+                self.set_status(match target {
+                    Some(_) => "Applying frequency cap…",
+                    None => "Removing frequency cap…",
+                });
+                spawn_blocking(
+                    move || backend::set_max_freq_khz(target).map(|_| target),
+                    Message::MaxFreqApplied,
+                )
+            }
+            Message::MaxFreqApplied(Ok(khz)) => {
+                self.set_max_freq(khz);
+                let msg = match khz {
+                    Some(k) => format!("Max frequency capped at {} MHz.", k / 1000),
+                    None => "Frequency cap removed.".to_string(),
+                };
+                self.set_status(&msg);
+                Task::none()
+            }
+            Message::MaxFreqApplied(Err(e)) => {
+                self.set_status(&format!("Error: {e}"));
+                Task::none()
+            }
+
             Message::NewProfileNameChanged(s) => {
                 self.new_profile_name = s;
                 Task::none()
@@ -474,6 +546,7 @@ impl App {
                     boost_enabled: self.state.boost_enabled,
                     smt_enabled: self.state.smt_enabled,
                     core_preset: self.state.core_preset.clone(),
+                    max_freq_khz: self.state.max_freq_khz,
                 };
                 profiles::upsert(&mut self.saved_profiles, saved);
                 profiles::save(&self.saved_profiles);
@@ -501,6 +574,7 @@ impl App {
                     self.state.boost_enabled = saved.boost_enabled;
                     self.state.smt_enabled = saved.smt_enabled;
                     self.state.core_preset = saved.core_preset;
+                    self.set_max_freq(saved.max_freq_khz);
                     self.fan_view_temp = fit_fan_view(&self.state.fan_curve.points);
                     self.set_status(&format!("Loaded '{}'.", self.selected_profile_name));
                 }
@@ -546,6 +620,7 @@ impl App {
                     boost_enabled: self.state.boost_enabled,
                     smt_enabled: self.state.smt_enabled,
                     core_preset: self.state.core_preset.clone(),
+                    max_freq_khz: self.state.max_freq_khz,
                 };
                 profiles::upsert(&mut self.saved_profiles, saved);
                 profiles::save(&self.saved_profiles);
@@ -608,6 +683,13 @@ impl App {
         if let Some(g) = self.state.current_gpu_temp {
             right = right.push(temp_pill("GPU", g));
         }
+        if let Some(mhz) = self.state.current_cpu_freq_mhz {
+            let label = match self.state.max_freq_khz {
+                Some(cap) => format!("{:.2} GHz / {} cap", mhz as f32 / 1000.0, cap / 1000),
+                None => format!("{:.2} GHz", mhz as f32 / 1000.0),
+            };
+            right = right.push(info_pill("CPU FREQ", label, theme::SKY));
+        }
         if let Some(rpm) = self.state.current_cpu_fan_rpm {
             right = right.push(info_pill("CPU FAN", format!("{rpm} rpm"), theme::SKY));
         }
@@ -615,7 +697,11 @@ impl App {
             right = right.push(info_pill("GPU FAN", format!("{rpm} rpm"), theme::SKY));
         }
         if let Some(w) = self.state.current_battery_discharge_w {
-            right = right.push(info_pill("BATT", format!("{w:.1} W"), theme::YELLOW));
+            let label = match self.state.current_battery_minutes_left {
+                Some(min) => format!("{w:.1} W · {}h{:02}", min / 60, min % 60),
+                None => format!("{w:.1} W"),
+            };
+            right = right.push(info_pill("BATT", label, theme::YELLOW));
         }
         right = right.push(
             button(text("Reload").size(13))
@@ -684,6 +770,41 @@ impl App {
         self.status_token = self.status_token.wrapping_add(1);
     }
 
+    /// Mirrors a cap value into both the model and the input field.
+    fn set_max_freq(&mut self, khz: Option<u32>) {
+        self.state.max_freq_khz = khz;
+        self.max_freq_capped = khz.is_some();
+        if let Some(k) = khz {
+            self.max_freq_str = (k / 1000).to_string();
+        } else if self.max_freq_str.trim().is_empty() {
+            self.max_freq_str = khz_to_mhz_string(self.state.freq_range_khz.map(|(_, hi)| hi));
+        }
+    }
+
+    /// Validates the cap input against the hardware range. `Ok(None)` means the
+    /// user wants no cap at all.
+    fn parse_max_freq_khz(&self) -> Result<Option<u32>, String> {
+        if !self.max_freq_capped {
+            return Ok(None);
+        }
+        let mhz: u32 = self
+            .max_freq_str
+            .trim()
+            .parse()
+            .map_err(|_| "Enter the frequency cap as whole MHz.".to_string())?;
+        let khz = mhz.saturating_mul(1000);
+        if let Some((lo, hi)) = self.state.freq_range_khz {
+            if khz < lo || khz > hi {
+                return Err(format!(
+                    "Cap must be between {} and {} MHz.",
+                    lo / 1000,
+                    hi / 1000
+                ));
+            }
+        }
+        Ok(Some(khz))
+    }
+
     fn set_ppt(&mut self, ppt: PptLimits) {
         self.ppt_apu_str = ppt.apu_limit.to_string();
         self.ppt_slow_str = ppt.slow_limit.to_string();
@@ -728,6 +849,11 @@ fn info_pill<'a>(label: &'static str, value: String, color: Color) -> Element<'a
     .into()
 }
 
+/// Formats an optional kHz value as a plain MHz string for the input field.
+fn khz_to_mhz_string(khz: Option<u32>) -> String {
+    khz.map(|k| (k / 1000).to_string()).unwrap_or_default()
+}
+
 fn spawn_blocking<T>(
     f: impl FnOnce() -> T + Send + 'static,
     msg: fn(T) -> Message,
@@ -767,6 +893,11 @@ fn apply_full_profile(saved: SavedProfile) -> Result<String, String> {
     // sysfs entries exist (or don't) when `cores` writes to them.
     backend::set_smt(saved.smt_enabled)?;
     backend::set_core_preset(&saved.core_preset)?;
+    // Only profiles saved since the frequency cap existed carry a value; older
+    // ones deserialize to None and leave the current cap untouched.
+    if let Some(khz) = saved.max_freq_khz {
+        backend::set_max_freq_khz(Some(khz))?;
+    }
     Ok(saved.name)
 }
 

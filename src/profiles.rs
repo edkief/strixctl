@@ -21,6 +21,10 @@ pub struct SavedProfile {
     pub smt_enabled: bool,
     #[serde(default)]
     pub core_preset: CorePreset,
+    /// Max CPU frequency cap in kHz; `None` (the default, and what older profile
+    /// files deserialize to) means "leave the cap alone when applying".
+    #[serde(default)]
+    pub max_freq_khz: Option<u32>,
 }
 
 /// Upserts `profile` into `list` by name (replaces if name already exists).

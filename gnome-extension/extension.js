@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
+import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -24,6 +27,9 @@ const IFACE_XML = `<node>
       <arg type="s" direction="in" name="profile"/>
     </method>
     <property name="CurrentTempC" type="d" access="read"/>
+    <property name="CpuFreqMhz" type="u" access="read"/>
+    <property name="PowerDrawW" type="d" access="read"/>
+    <property name="BatteryMinutesLeft" type="i" access="read"/>
     <property name="CurrentPlatformProfile" type="s" access="read"/>
     <property name="CurrentSavedProfile" type="s" access="read"/>
     <method name="NotifyProfileApplied">
@@ -37,6 +43,11 @@ const IFACE_XML = `<node>
     </signal>
     <signal name="SavedProfileChanged">
       <arg type="s" name="name"/>
+    </signal>
+    <signal name="MetricsChanged">
+      <arg type="u" name="freq_mhz"/>
+      <arg type="d" name="power_w"/>
+      <arg type="i" name="battery_minutes"/>
     </signal>
   </interface>
 </node>`;
@@ -223,6 +234,92 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
     }
 });
 
+// ── Panel pill (metrics next to the clock) ───────────────────────────────
+//
+// A plain label in the panel's centre box, right after the clock. What it shows
+// is chosen in prefs: CPU frequency, battery power draw, remaining battery time,
+// or any combination. Values arrive through the daemon's MetricsChanged signal
+// (at most 1 Hz), with the D-Bus properties used for the initial paint.
+
+const StrixCtlPill = GObject.registerClass(
+class StrixCtlPill extends PanelMenu.Button {
+    _init(proxy, settings) {
+        // dontCreateMenu: this is a readout, not a menu button.
+        super._init(0.5, 'strixctl', true);
+
+        this._proxy = proxy;
+        this._settings = settings;
+
+        this._freqMhz = proxy.CpuFreqMhz ?? 0;
+        this._powerW = proxy.PowerDrawW ?? 0;
+        this._batteryMinutes = proxy.BatteryMinutesLeft ?? -1;
+
+        this._label = new St.Label({
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'strixctl-pill-label',
+        });
+        this.add_child(this._label);
+
+        this._metricsSignalId = this._proxy.connectSignal(
+            'MetricsChanged',
+            (_proxy, _sender, [freqMhz, powerW, batteryMinutes]) => {
+                this._freqMhz = freqMhz;
+                this._powerW = powerW;
+                this._batteryMinutes = batteryMinutes;
+                this._updateLabel();
+            }
+        );
+
+        this._settingsIds = [
+            'pill-enabled',
+            'pill-show-freq',
+            'pill-show-power',
+            'pill-show-battery',
+        ].map(key => this._settings.connect(`changed::${key}`, () => this._updateLabel()));
+
+        this.connect('button-press-event', () => {
+            Shell.AppSystem.get_default().lookup_app('strixctl.desktop')?.activate();
+            return Clutter.EVENT_STOP;
+        });
+
+        this._updateLabel();
+    }
+
+    _updateLabel() {
+        const parts = [];
+        if (this._settings.get_boolean('pill-show-freq'))
+            parts.push(this._freqMhz > 0 ? `${(this._freqMhz / 1000).toFixed(2)} GHz` : '— GHz');
+        if (this._settings.get_boolean('pill-show-power'))
+            parts.push(this._powerW > 0 ? `${this._powerW.toFixed(1)} W` : 'AC');
+        if (this._settings.get_boolean('pill-show-battery')) {
+            if (this._batteryMinutes >= 0) {
+                const h = Math.floor(this._batteryMinutes / 60);
+                const m = this._batteryMinutes % 60;
+                parts.push(`${h}:${m.toString().padStart(2, '0')}`);
+            } else {
+                parts.push('AC');
+            }
+        }
+
+        // Nothing selected (or the pill switched off) means no panel real estate.
+        const visible = this._settings.get_boolean('pill-enabled') && parts.length > 0;
+        this.visible = visible;
+        if (visible)
+            this._label.text = parts.join('  ·  ');
+    }
+
+    destroy() {
+        if (this._metricsSignalId !== undefined) {
+            this._proxy.disconnectSignal(this._metricsSignalId);
+            this._metricsSignalId = undefined;
+        }
+        for (const id of this._settingsIds ?? [])
+            this._settings.disconnect(id);
+        this._settingsIds = [];
+        super.destroy();
+    }
+});
+
 // ── System indicator (the icon that sits in the status bar) ──────────────
 
 const StrixCtlIndicator = GObject.registerClass(
@@ -272,11 +369,17 @@ export default class StrixCtlExtension extends Extension {
         this._indicator = new StrixCtlIndicator(this._proxy);
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
 
+        // Panel pill, in the centre box just after the clock. Index 1 puts it to
+        // the right of the date menu, which always sits at index 0 there.
+        this._settings = this.getSettings();
+        this._pill = new StrixCtlPill(this._proxy, this._settings);
+        Main.panel.addToStatusArea('strixctl-pill', this._pill, 1, 'center');
+
         // Hotkey: default <Super>p, configurable in prefs or via gsettings.
         // On ASUS ROG laptops, Fn+Q may report as XF86Launch1 — set that in prefs.
         Main.wm.addKeybinding(
             'cycle-profiles-key',
-            this.getSettings(),
+            this._settings,
             Meta.KeyBindingFlags.NONE,
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
             () => this._indicator._toggle.cycleNext()
@@ -285,6 +388,9 @@ export default class StrixCtlExtension extends Extension {
 
     disable() {
         Main.wm.removeKeybinding('cycle-profiles-key');
+        this._pill?.destroy();
+        this._pill = null;
+        this._settings = null;
         this._indicator?.destroy();
         this._indicator = null;
         this._proxy = null;

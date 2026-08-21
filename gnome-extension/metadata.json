@@ -1,8 +1,8 @@
 {
   "uuid": "strixctl@strixctl",
   "name": "strixctl",
-  "description": "Switch strixctl custom profiles from GNOME Quick Settings",
-  "version": 1,
+  "description": "Switch strixctl custom profiles from GNOME Quick Settings, with a live CPU/power pill in the top bar",
+  "version": 2,
   "shell-version": ["46", "47", "48", "50"],
   "url": "https://github.com/ekieffer/strixctl",
   "settings-schema": "org.gnome.shell.extensions.strixctl"

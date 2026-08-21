@@ -11,10 +11,15 @@
 //!   ApplyPpt(apu_mw: u, fast_mw: u, slow_mw: u) -> (nothing, or D-Bus error)
 //!
 //! Properties
-//!   CurrentTempC  (read-only f64)
+//!   CurrentTempC        (read-only f64)
+//!   CpuFreqMhz          (read-only u32)  — fastest core, live
+//!   PowerDrawW          (read-only f64)  — battery draw, 0 on AC
+//!   BatteryMinutesLeft  (read-only i32)  — -1 when unknown / on AC
 //!
 //! Signals
 //!   TempChanged(temp: f64)   — fired when temp shifts by > 0.5 °C
+//!   MetricsChanged(freq_mhz: u32, power_w: f64, battery_minutes: i32)
+//!                            — fired at most 1 Hz when any of them moves
 
 #[path = "../state.rs"]
 mod state;
@@ -22,8 +27,9 @@ mod state;
 mod backend;
 #[path = "../profiles.rs"]
 mod profiles;
+#[path = "../watcher.rs"]
+mod watcher;
 
-use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,6 +61,9 @@ const RESUME_QUIET_PERIOD: Duration = Duration::from_secs(30);
 
 struct StrixCtlService {
     current_temp: Arc<Mutex<f64>>,
+    current_freq_mhz: Arc<Mutex<u32>>,
+    current_power_w: Arc<Mutex<f64>>,
+    battery_minutes: Arc<Mutex<i32>>,
     current_profile: Arc<Mutex<String>>,
     current_saved_profile: Arc<Mutex<String>>,
     boost_enabled: Arc<Mutex<bool>>,
@@ -212,9 +221,37 @@ impl StrixCtlService {
     #[zbus(signal)]
     async fn core_preset_changed(ctxt: &SignalContext<'_>, preset: u32) -> zbus::Result<()>;
 
+    /// Fastest live core frequency in MHz; 0 when unknown.
+    #[zbus(property)]
+    fn cpu_freq_mhz(&self) -> u32 {
+        *self.current_freq_mhz.lock().unwrap()
+    }
+
+    /// Battery discharge in watts; 0.0 while on AC.
+    #[zbus(property)]
+    fn power_draw_w(&self) -> f64 {
+        *self.current_power_w.lock().unwrap()
+    }
+
+    /// Minutes of battery left at the current draw; -1 on AC or when unknown.
+    #[zbus(property)]
+    fn battery_minutes_left(&self) -> i32 {
+        *self.battery_minutes.lock().unwrap()
+    }
+
     /// Emitted when the CPU temperature changes by more than 0.5 °C.
     #[zbus(signal)]
     async fn temp_changed(ctxt: &SignalContext<'_>, temp: f64) -> zbus::Result<()>;
+
+    /// Emitted when frequency, power draw, or battery estimate moves. Carries
+    /// all three so a panel display can refresh from a single signal.
+    #[zbus(signal)]
+    async fn metrics_changed(
+        ctxt: &SignalContext<'_>,
+        freq_mhz: u32,
+        power_w: f64,
+        battery_minutes: i32,
+    ) -> zbus::Result<()>;
 
     /// Emitted when the asusctl platform profile changes.
     #[zbus(signal)]
@@ -263,6 +300,13 @@ async fn run_apply_saved_profile(name: &str) -> Vec<String> {
         errors.push(format!("core preset: {e}"));
     }
 
+    // Absent in profiles saved before the cap existed — leave the cap alone then.
+    if let Some(khz) = profile.max_freq_khz {
+        if let Err(e) = backend::set_max_freq_khz(Some(khz)) {
+            errors.push(format!("max frequency: {e}"));
+        }
+    }
+
     errors
 }
 
@@ -295,11 +339,17 @@ async fn main() -> zbus::Result<()> {
     let core_preset = Arc::new(Mutex::new(
         backend::read_core_preset().as_u32()
     ));
+    let current_freq_mhz = Arc::new(Mutex::new(0u32));
+    let current_power_w = Arc::new(Mutex::new(0.0f64));
+    let battery_minutes = Arc::new(Mutex::new(-1i32));
     let last_applied_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let resume_quiet_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     let service = StrixCtlService {
         current_temp: current_temp.clone(),
+        current_freq_mhz: current_freq_mhz.clone(),
+        current_power_w: current_power_w.clone(),
+        battery_minutes: battery_minutes.clone(),
         current_profile: current_profile.clone(),
         current_saved_profile: current_saved_profile.clone(),
         boost_enabled: boost_enabled.clone(),
@@ -382,26 +432,58 @@ async fn main() -> zbus::Result<()> {
         });
     }
 
-    // Poll CPU temp every second; emit TempChanged when it shifts by > 0.5 °C.
+    // Poll sensors every second; emit TempChanged when the temperature shifts by
+    // > 0.5 °C and MetricsChanged when frequency, power draw, or the battery
+    // estimate moves. All of it is plain sysfs reads — never the SMU mailbox —
+    // so this loop is safe to run at 1 Hz regardless of the drift guards.
     let conn_clone = conn.clone();
     tokio::spawn(async move {
-        let mut last_emitted = f64::NAN;
+        let mut last_temp = f64::NAN;
+        let mut last_metrics: Option<(u32, f64, i32)> = None;
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
-            let Some(temp_c) = read_cpu_temp() else { continue };
-            let temp = temp_c as f64;
-            *current_temp.lock().unwrap() = temp;
+            let reading = watcher::read_now();
 
-            if last_emitted.is_nan() || (temp - last_emitted).abs() > 0.5 {
-                last_emitted = temp;
-                if let Ok(iref) = conn_clone
-                    .object_server()
-                    .interface::<_, StrixCtlService>("/com/strixctl/Service")
-                    .await
-                {
-                    let _ = StrixCtlService::temp_changed(iref.signal_context(), temp).await;
+            let temp = reading.temp_c as f64;
+            if temp > 0.0 {
+                *current_temp.lock().unwrap() = temp;
+            }
+            let freq = reading.cpu_freq_mhz.unwrap_or(0);
+            let power = reading.battery_discharge_w.unwrap_or(0.0) as f64;
+            let minutes = reading.battery_minutes_left.map_or(-1, |m| m as i32);
+            *current_freq_mhz.lock().unwrap() = freq;
+            *current_power_w.lock().unwrap() = power;
+            *battery_minutes.lock().unwrap() = minutes;
+
+            let temp_moved = temp > 0.0 && (last_temp.is_nan() || (temp - last_temp).abs() > 0.5);
+            // Thresholds keep a busy CPU from emitting a signal for every MHz of
+            // jitter while still tracking real changes at 1 Hz.
+            let metrics_moved = match last_metrics {
+                None => true,
+                Some((f, p, m)) => {
+                    freq.abs_diff(f) >= 50 || (power - p).abs() >= 0.3 || minutes != m
                 }
+            };
+            if !temp_moved && !metrics_moved {
+                continue;
+            }
+
+            let Ok(iref) = conn_clone
+                .object_server()
+                .interface::<_, StrixCtlService>("/com/strixctl/Service")
+                .await
+            else { continue };
+
+            if temp_moved {
+                last_temp = temp;
+                let _ = StrixCtlService::temp_changed(iref.signal_context(), temp).await;
+            }
+            if metrics_moved {
+                last_metrics = Some((freq, power, minutes));
+                let _ = StrixCtlService::metrics_changed(
+                    iref.signal_context(), freq, power, minutes,
+                ).await;
             }
         }
     });
@@ -587,20 +669,3 @@ async fn main() -> zbus::Result<()> {
     unreachable!()
 }
 
-// ── Temperature reading ──────────────────────────────────────────────────────
-
-fn read_cpu_temp() -> Option<f32> {
-    for zone in 0..20u8 {
-        let base = format!("/sys/class/thermal/thermal_zone{zone}");
-        let zone_type = fs::read_to_string(format!("{base}/type")).unwrap_or_default();
-        let t = zone_type.trim();
-        if t == "x86_pkg_temp" || t.contains("cpu") {
-            if let Ok(raw) = fs::read_to_string(format!("{base}/temp")) {
-                if let Ok(v) = raw.trim().parse::<f32>() {
-                    return Some(v / 1000.0);
-                }
-            }
-        }
-    }
-    None
-}

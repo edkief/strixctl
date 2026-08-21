@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
 import Adw from 'gi://Adw';
@@ -84,6 +85,37 @@ export default class StrixCtrlPrefs extends ExtensionPreferences {
         kbRow.add_suffix(shortcutLabel);
         kbRow.add_suffix(editBtn);
         kbRow.add_suffix(clearBtn);
+
+        // ── Panel pill ────────────────────────────────────────────────────
+
+        const pillGroup = new Adw.PreferencesGroup({
+            title: 'Panel Pill',
+            description: 'A live readout in the top bar, next to the clock. ' +
+                'It needs the strixctld daemon running.',
+        });
+        page.add(pillGroup);
+
+        const enabledRow = new Adw.SwitchRow({
+            title: 'Show pill',
+            subtitle: 'Hidden automatically when nothing below is selected.',
+        });
+        pillGroup.add(enabledRow);
+        settings.bind('pill-enabled', enabledRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+
+        const rows = [
+            ['pill-show-freq', 'CPU frequency', 'Fastest live core, in GHz.'],
+            ['pill-show-power', 'Power draw', 'Battery discharge in watts, "AC" on mains.'],
+            ['pill-show-battery', 'Battery time left', 'Estimated h:mm at the current draw.'],
+        ];
+        for (const [key, title, subtitle] of rows) {
+            const row = new Adw.SwitchRow({title, subtitle});
+            pillGroup.add(row);
+            settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+            // The contents only matter while the pill itself is shown.
+            enabledRow.bind_property('active', row, 'sensitive',
+                GObject.BindingFlags.SYNC_CREATE);
+        }
 
         // ── Fn+Q note ─────────────────────────────────────────────────────
 

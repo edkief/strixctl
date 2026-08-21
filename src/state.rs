@@ -111,6 +111,16 @@ pub struct AppState {
     pub boost_enabled: bool,
     pub smt_enabled: bool,
     pub core_preset: CorePreset,
+    /// Max CPU frequency cap in kHz. `None` means uncapped — the hardware
+    /// maximum applies.
+    pub max_freq_khz: Option<u32>,
+    /// Hardware frequency range (min, max) in kHz as reported by cpufreq.
+    /// `None` where the platform cannot report it (Windows), which also means
+    /// the UI has no bounds to validate against.
+    pub freq_range_khz: Option<(u32, u32)>,
+    /// Highest live core frequency in MHz — the best single-number proxy for
+    /// "what is the CPU running at", since cores clock independently.
+    pub current_cpu_freq_mhz: Option<u32>,
     /// True when a core-count change has been applied but needs a reboot to take
     /// effect (Windows `bcdedit numproc`). Always false on Linux.
     pub core_reboot_pending: bool,
@@ -119,6 +129,8 @@ pub struct AppState {
     pub current_cpu_fan_rpm: Option<u32>,
     pub current_gpu_fan_rpm: Option<u32>,
     pub current_battery_discharge_w: Option<f32>,
+    /// Minutes of battery left at the current draw; `None` on AC.
+    pub current_battery_minutes_left: Option<u32>,
     pub current_power: f32,
     pub status_msg: String,
 }
@@ -132,12 +144,16 @@ impl Default for AppState {
             boost_enabled: true,
             smt_enabled: true,
             core_preset: CorePreset::default(),
+            max_freq_khz: None,
+            freq_range_khz: None,
+            current_cpu_freq_mhz: None,
             core_reboot_pending: false,
             current_temp: 0.0,
             current_gpu_temp: None,
             current_cpu_fan_rpm: None,
             current_gpu_fan_rpm: None,
             current_battery_discharge_w: None,
+            current_battery_minutes_left: None,
             current_power: 0.0,
             status_msg: String::from("Ready"),
         }
