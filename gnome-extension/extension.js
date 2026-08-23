@@ -68,7 +68,6 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
         this._proxy = proxy;
         this._profiles = [];
         this._activeProfile = null;
-        this._tempC = proxy.CurrentTempC ?? null;
         this._platformProfile = proxy.CurrentPlatformProfile ?? null;
         this._savedProfile = proxy.CurrentSavedProfile || null;
 
@@ -80,15 +79,6 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
             if (open)
                 this._refreshProfiles();
         });
-
-        // Track temperature changes for the subtitle.
-        this._tempSignalId = this._proxy.connectSignal(
-            'TempChanged',
-            (_proxy, _sender, [temp]) => {
-                this._tempC = temp;
-                this._updateSubtitle();
-            }
-        );
 
         // Track platform profile changes from any source (GUI, CLI, etc.).
         this._profileSignalId = this._proxy.connectSignal(
@@ -118,8 +108,6 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
         const profileLabel = this._savedProfile || this._platformProfile;
         if (profileLabel)
             parts.push(profileLabel);
-        if (this._tempC !== null && this._tempC > 0)
-            parts.push(`${this._tempC.toFixed(1)} °C`);
         this.subtitle = parts.length ? parts.join('  ·  ') : null;
     }
 
@@ -218,10 +206,6 @@ class StrixCtlToggle extends QuickSettings.QuickMenuToggle {
     }
 
     destroy() {
-        if (this._tempSignalId !== undefined) {
-            this._proxy.disconnectSignal(this._tempSignalId);
-            this._tempSignalId = undefined;
-        }
         if (this._profileSignalId !== undefined) {
             this._proxy.disconnectSignal(this._profileSignalId);
             this._profileSignalId = undefined;
