@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use iced::widget::{button, column, container, row, text, Row, Space};
-use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
+use iced::widget::{button, column, container, row, scrollable, text, Row, Space};
+use iced::{keyboard, Alignment, Color, Element, Length, Subscription, Task, Theme};
 
 use crate::backend;
 use crate::platform;
@@ -45,6 +45,7 @@ impl Tab {
 pub enum Message {
     Tick,
     TabSelected(Tab),
+    TabKeyPressed(bool),
     Reload,
 
     // Profile
@@ -193,7 +194,15 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+        Subscription::batch([
+            iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
+            keyboard::on_key_press(|key, modifiers| match key {
+                keyboard::Key::Named(keyboard::key::Named::Tab) => {
+                    Some(Message::TabKeyPressed(modifiers.shift()))
+                }
+                _ => None,
+            }),
+        ])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -223,6 +232,14 @@ impl App {
             Message::TabSelected(t) => {
                 self.tab = t;
                 Task::none()
+            }
+
+            Message::TabKeyPressed(shift) => {
+                if shift {
+                    iced::widget::focus_previous()
+                } else {
+                    iced::widget::focus_next()
+                }
             }
 
             Message::Reload => {
@@ -652,10 +669,14 @@ impl App {
             Tab::Cooling => views::cooling::view(self),
             Tab::Saved => views::saved::view(self),
         };
-        let body = container(content)
-            .padding(20)
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let body = container(
+            scrollable(content)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .padding(20)
+        .width(Length::Fill)
+        .height(Length::Fill);
         let status = self.status_bar();
 
         container(column![top, tabs, body, status].spacing(0))
