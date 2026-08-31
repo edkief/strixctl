@@ -45,12 +45,17 @@ uninstall-polkit:
 
 # ── User installs (no sudo) ───────────────────────────────────────────────
 
-.PHONY: install-bin install-desktop install-daemon install-systemd install-extension
+.PHONY: install-bin install-gui install-cpuctl install-desktop
+.PHONY: install-daemon install-systemd install-extension
 .PHONY: uninstall-bin uninstall-desktop uninstall-daemon uninstall-extension
 
-install-bin:
+install-gui: build
 	$(SUDO) install -Dm755 target/release/strixctl $(PREFIX)/bin/strixctl
+
+install-cpuctl: build
 	$(SUDO) install -Dm755 target/release/strixctl-cpuctl $(PREFIX)/bin/strixctl-cpuctl
+
+install-bin: install-gui install-cpuctl
 
 uninstall-bin:
 	$(SUDO) rm -f $(PREFIX)/bin/strixctl
@@ -69,7 +74,9 @@ uninstall-desktop:
 # The enabled Type=dbus user unit is the sole process owner. The D-Bus
 # activation file delegates to that same unit, avoiding a direct-Exec race and
 # ensuring the daemon is already listening before the first suspend of a login.
-install-daemon:
+# The daemon calls the installed privileged helper, so do not restart it until
+# the helper from the same build has reached $(PREFIX)/bin.
+install-daemon: build install-cpuctl
 	install -Dm755 target/release/strixctld $(HOME)/.cargo/bin/strixctld
 	install -Dm644 systemd/strixctld.service \
 	  $(HOME)/.config/systemd/user/strixctld.service
@@ -109,7 +116,7 @@ uninstall-extension:
 
 .PHONY: all uninstall
 
-all: build install-polkit install-daemon install-extension install-bin install-desktop
+all: install-polkit install-bin install-daemon install-extension install-desktop
 	@echo ""
 	@echo "Installation complete."
 	@echo "Enable the GNOME extension with:"

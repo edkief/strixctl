@@ -112,7 +112,7 @@ Installs the `strixctld` release binary into `~/.cargo/bin`, installs and enable
 its `Type=dbus` systemd user unit, and writes a D-Bus activation file that
 delegates to that same unit. Starting it at login is required for the daemon's
 pre-suspend CPU safety handler; activation only on first client use could miss an
-earlier suspend. Build it first with `make build` (or `make build-daemon`).
+earlier suspend. The install target builds the binaries before installing them.
 
 ### 3. Systemd user service
 
