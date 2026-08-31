@@ -190,6 +190,51 @@ pub fn set_core_preset(preset: &CorePreset) -> Result<(), String> {
     ])
 }
 
+/// Brings every kernel-present CPU online through the privileged helper, then
+/// independently verifies the kernel's present and online masks.
+pub fn online_all_cpus() -> Result<(), String> {
+    run_cmd("pkexec", &[
+        "/usr/local/bin/strixctl-cpuctl",
+        "online-all",
+        "now",
+    ])?;
+    verify_all_cpus_online()
+}
+
+fn verify_all_cpus_online() -> Result<(), String> {
+    let present = read_cpu_mask("/sys/devices/system/cpu/present")?;
+    let online = read_cpu_mask("/sys/devices/system/cpu/online")?;
+    let missing: Vec<u32> = present.difference(&online).copied().collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "CPU online verification failed; present CPUs still offline: {}",
+            missing.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+        ))
+    }
+}
+
+fn read_cpu_mask(path: &str) -> Result<std::collections::BTreeSet<u32>, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {path}: {e}"))?;
+    let mut cpus = std::collections::BTreeSet::new();
+    for part in raw.trim().split(',').filter(|part| !part.is_empty()) {
+        let (start, end) = part.split_once('-').unwrap_or((part, part));
+        let start: u32 = start.parse().map_err(|_| format!("invalid CPU mask '{raw}'"))?;
+        let end: u32 = end.parse().map_err(|_| format!("invalid CPU mask '{raw}'"))?;
+        if start > end {
+            return Err(format!("invalid CPU range '{part}' in {path}"));
+        }
+        cpus.extend(start..=end);
+    }
+    if cpus.is_empty() {
+        Err(format!("empty CPU mask in {path}"))
+    } else {
+        Ok(cpus)
+    }
+}
+
 /// Reads the hardware frequency range (min, max) in kHz from cpufreq.
 ///
 /// `cpuinfo_max_freq` is the ceiling the kernel accepts for `scaling_max_freq`,

@@ -108,14 +108,21 @@ This installs `com.strixctl.ryzenadj.policy`, which allows `ryzenadj` to run via
 make install-daemon
 ```
 
-Installs the `strixctld` release binary into `~/.cargo/bin` and writes the D-Bus session activation file so the bus auto-starts the daemon on first use. Build it first with `make build` (or `make build-daemon`).
+Installs the `strixctld` release binary into `~/.cargo/bin`, installs and enables
+its `Type=dbus` systemd user unit, and writes a D-Bus activation file that
+delegates to that same unit. Starting it at login is required for the daemon's
+pre-suspend CPU safety handler; activation only on first client use could miss an
+earlier suspend. Build it first with `make build` (or `make build-daemon`).
 
-### 3. Install the systemd user service (optional)
+### 3. Systemd user service
 
 ```sh
 make install-systemd
-systemctl --user enable --now strixctld
 ```
+
+`make install-daemon` already performs this step. The separate target remains
+for updating the unit during development. Do not run a second direct-Exec D-Bus
+service alongside it; both activation paths intentionally converge on this unit.
 
 ### 4. Install the GNOME Shell extension (optional)
 

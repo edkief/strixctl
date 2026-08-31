@@ -3,6 +3,8 @@ Description=strixctl D-Bus daemon
 Documentation=https://github.com/ekieffer/strixctl
 
 [Service]
+Type=dbus
+BusName=com.strixctl.Service
 ExecStart=%h/.cargo/bin/strixctld
 Restart=on-failure
 RestartSec=5

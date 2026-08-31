@@ -66,23 +66,33 @@ uninstall-desktop:
 	$(SUDO) rm -f $(PREFIX)/share/applications/strixctl.desktop
 	-$(SUDO) gtk-update-icon-cache -f -t $(PREFIX)/share/icons/hicolor
 
-# cargo install puts the binary in ~/.cargo/bin/, matching the ExecStart in
-# systemd/strixctld.service.  The D-Bus session activation file goes in the
-# XDG user services dir so the session bus can auto-start the daemon.
+# The enabled Type=dbus user unit is the sole process owner. The D-Bus
+# activation file delegates to that same unit, avoiding a direct-Exec race and
+# ensuring the daemon is already listening before the first suspend of a login.
 install-daemon:
 	install -Dm755 target/release/strixctld $(HOME)/.cargo/bin/strixctld
+	install -Dm644 systemd/strixctld.service \
+	  $(HOME)/.config/systemd/user/strixctld.service
 	install -d $(DBUS_USER_DIR)
-	printf '[D-BUS Service]\nName=com.strixctl.Service\nExec=%s/.cargo/bin/strixctld\n' \
+	printf '[D-BUS Service]\nName=com.strixctl.Service\nExec=%s/.cargo/bin/strixctld\nSystemdService=strixctld.service\n' \
 	    '$(HOME)' > $(DBUS_USER_DIR)/com.strixctl.Service.service
+	systemctl --user daemon-reload
+	systemctl --user enable strixctld.service
+	-pkill -x strixctld
+	systemctl --user restart strixctld.service
 
 uninstall-daemon:
-	-cargo uninstall strixctld
+	-systemctl --user disable --now strixctld.service
+	rm -f $(HOME)/.cargo/bin/strixctld
 	rm -f $(DBUS_USER_DIR)/com.strixctl.Service.service
+	rm -f $(HOME)/.config/systemd/user/strixctld.service
+	systemctl --user daemon-reload
 
 install-systemd:
 	install -Dm644 systemd/strixctld.service \
 	  $(HOME)/.config/systemd/user/strixctld.service
 	systemctl --user daemon-reload
+	systemctl --user enable --now strixctld.service
 
 install-extension:
 	install -d $(EXTENSION_DIR)/schemas
@@ -99,8 +109,7 @@ uninstall-extension:
 
 .PHONY: all uninstall
 
-all: build install-polkit install-daemon install-systemd install-extension install-bin install-desktop
-	systemctl --user restart strixctld || systemctl --user start strixctld
+all: build install-polkit install-daemon install-extension install-bin install-desktop
 	@echo ""
 	@echo "Installation complete."
 	@echo "Enable the GNOME extension with:"

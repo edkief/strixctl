@@ -30,11 +30,16 @@ mod profiles;
 #[path = "../watcher.rs"]
 mod watcher;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use zbus::{connection, fdo, interface, object_server::SignalContext};
+use zbus::zvariant::OwnedFd;
 
 use crate::state::{CorePreset, FanCurve, PptLimits, Profile};
 
@@ -47,6 +52,13 @@ use crate::state::{CorePreset, FanCurve, PptLimits, Profile};
     default_path = "/org/freedesktop/login1"
 )]
 trait Login1Manager {
+    /// A delay inhibitor is required: PrepareForSleep is only a notification,
+    /// and logind does not otherwise wait for this daemon's sysfs writes.
+    fn inhibit(&self, what: &str, who: &str, why: &str, mode: &str) -> zbus::Result<OwnedFd>;
+
+    #[zbus(property)]
+    fn preparing_for_sleep(&self) -> zbus::Result<bool>;
+
     #[zbus(signal)]
     fn prepare_for_sleep(&self, start: bool) -> zbus::Result<()>;
 }
@@ -69,6 +81,21 @@ struct StrixCtlService {
     boost_enabled: Arc<Mutex<bool>>,
     core_preset: Arc<Mutex<u32>>,
     last_applied_at: Arc<Mutex<Option<Instant>>>,
+    apply_lock: Arc<AsyncMutex<()>>,
+    apply_generation: Arc<AtomicU64>,
+    suspend_pending: Arc<AtomicBool>,
+}
+
+impl StrixCtlService {
+    fn ensure_not_suspending(&self) -> fdo::Result<()> {
+        if self.suspend_pending.load(Ordering::SeqCst) {
+            Err(fdo::Error::Failed(
+                "system suspend is in progress; retry after resume".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[interface(name = "com.strixctl.Service")]
@@ -90,8 +117,11 @@ impl StrixCtlService {
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
         name: &str,
     ) -> fdo::Result<()> {
+        let _guard = self.apply_lock.lock().await;
+        self.ensure_not_suspending()?;
         let errors = run_apply_saved_profile(name).await;
         if errors.is_empty() {
+            self.apply_generation.fetch_add(1, Ordering::SeqCst);
             *self.last_applied_at.lock().unwrap() = Some(Instant::now());
             profiles::save_active(name);
             let changed = {
@@ -113,7 +143,7 @@ impl StrixCtlService {
     }
 
     /// Sets the asusctl platform profile. Accepts "quiet", "balanced", or "performance".
-    fn set_asus_profile(&self, profile: &str) -> fdo::Result<()> {
+    async fn set_asus_profile(&self, profile: &str) -> fdo::Result<()> {
         let p = match profile.to_ascii_lowercase().as_str() {
             "quiet" => Profile::Quiet,
             "balanced" => Profile::Balanced,
@@ -124,21 +154,28 @@ impl StrixCtlService {
                 )))
             }
         };
+        let _guard = self.apply_lock.lock().await;
+        self.ensure_not_suspending()?;
         backend::apply_profile(&p).map_err(fdo::Error::Failed)?;
+        self.apply_generation.fetch_add(1, Ordering::SeqCst);
         *self.last_applied_at.lock().unwrap() = Some(Instant::now());
         Ok(())
     }
 
     /// Applies PPT limits directly (values in milliwatts).
     /// slow_mw must not exceed fast_mw.
-    fn apply_ppt(&self, apu_mw: u32, fast_mw: u32, slow_mw: u32) -> fdo::Result<()> {
+    async fn apply_ppt(&self, apu_mw: u32, fast_mw: u32, slow_mw: u32) -> fdo::Result<()> {
         let ppt = PptLimits { apu_limit: apu_mw, fast_limit: fast_mw, slow_limit: slow_mw };
         if !ppt.is_valid() {
             return Err(fdo::Error::InvalidArgs(
                 "slow_mw must not exceed fast_mw".into(),
             ));
         }
-        backend::apply_ppt(&ppt).map_err(fdo::Error::Failed)
+        let _guard = self.apply_lock.lock().await;
+        self.ensure_not_suspending()?;
+        backend::apply_ppt(&ppt).map_err(fdo::Error::Failed)?;
+        self.apply_generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Current CPU package temperature in °C (updated every second).
@@ -161,6 +198,9 @@ impl StrixCtlService {
 
     /// Called by the GUI (best-effort) when a saved profile is applied directly.
     async fn notify_profile_applied(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>, name: &str) -> fdo::Result<()> {
+        let _guard = self.apply_lock.lock().await;
+        self.ensure_not_suspending()?;
+        self.apply_generation.fetch_add(1, Ordering::SeqCst);
         let changed = {
             let mut guard = self.current_saved_profile.lock().unwrap();
             if *guard != name {
@@ -182,7 +222,10 @@ impl StrixCtlService {
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
         enabled: bool,
     ) -> fdo::Result<()> {
+        let _guard = self.apply_lock.lock().await;
+        self.ensure_not_suspending()?;
         backend::set_boost(enabled).map_err(fdo::Error::Failed)?;
+        self.apply_generation.fetch_add(1, Ordering::SeqCst);
         *self.boost_enabled.lock().unwrap() = enabled;
         let _ = Self::boost_changed(&ctxt, enabled).await;
         Ok(())
@@ -195,7 +238,10 @@ impl StrixCtlService {
         preset: u32,
     ) -> fdo::Result<()> {
         let cp = CorePreset::from_u32(preset);
+        let _guard = self.apply_lock.lock().await;
+        self.ensure_not_suspending()?;
         backend::set_core_preset(&cp).map_err(fdo::Error::Failed)?;
+        self.apply_generation.fetch_add(1, Ordering::SeqCst);
         *self.core_preset.lock().unwrap() = preset;
         let _ = Self::core_preset_changed(&ctxt, preset).await;
         Ok(())
@@ -296,6 +342,12 @@ async fn run_apply_saved_profile(name: &str) -> Vec<String> {
         errors.push(format!("boost: {e}"));
     }
 
+    // Pre-suspend preparation may temporarily enable SMT so every present CPU
+    // can be online. Restore the saved SMT choice before its core preset.
+    if let Err(e) = backend::set_smt(profile.smt_enabled) {
+        errors.push(format!("SMT: {e}"));
+    }
+
     if let Err(e) = backend::set_core_preset(&profile.core_preset) {
         errors.push(format!("core preset: {e}"));
     }
@@ -344,6 +396,9 @@ async fn main() -> zbus::Result<()> {
     let battery_minutes = Arc::new(Mutex::new(-1i32));
     let last_applied_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let resume_quiet_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let apply_lock = Arc::new(AsyncMutex::new(()));
+    let apply_generation = Arc::new(AtomicU64::new(0));
+    let suspend_pending = Arc::new(AtomicBool::new(false));
 
     let service = StrixCtlService {
         current_temp: current_temp.clone(),
@@ -355,6 +410,9 @@ async fn main() -> zbus::Result<()> {
         boost_enabled: boost_enabled.clone(),
         core_preset: core_preset.clone(),
         last_applied_at: last_applied_at.clone(),
+        apply_lock: apply_lock.clone(),
+        apply_generation: apply_generation.clone(),
+        suspend_pending: suspend_pending.clone(),
     };
 
     let conn = connection::Builder::session()?
@@ -374,10 +432,23 @@ async fn main() -> zbus::Result<()> {
     if let Some(name) = profiles::load_active() {
         let conn_startup = conn.clone();
         let last_applied_startup = last_applied_at.clone();
+        let apply_lock_startup = apply_lock.clone();
+        let apply_generation_startup = apply_generation.clone();
+        let resume_quiet_startup = resume_quiet_until.clone();
+        let suspend_pending_startup = suspend_pending.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
+            let _guard = apply_lock_startup.lock().await;
+            let resume_quiet = resume_quiet_startup
+                .lock().unwrap()
+                .is_some_and(|deadline| Instant::now() < deadline);
+            if suspend_pending_startup.load(Ordering::SeqCst) || resume_quiet {
+                eprintln!("[strixctld] startup apply deferred to resume restoration");
+                return;
+            }
             let errors = run_apply_saved_profile(&name).await;
             if errors.is_empty() {
+                apply_generation_startup.fetch_add(1, Ordering::SeqCst);
                 *last_applied_startup.lock().unwrap() = Some(Instant::now());
                 eprintln!("[strixctld] startup: applied profile '{name}'");
                 if let Ok(iref) = conn_startup
@@ -395,11 +466,17 @@ async fn main() -> zbus::Result<()> {
         });
     }
 
-    // Watch systemd-logind for resume-from-sleep so the drift guards below don't
-    // poke the SMU mailbox while amdgpu is still re-initializing after wake, the
-    // same hazard the 30 s startup delay above guards against on boot.
+    // Hold a logind delay inhibitor while preparing for suspend. A
+    // PrepareForSleep(true) signal alone is not a synchronization barrier:
+    // without the inhibitor, logind may enter sleep while cpuctl is still
+    // bringing CPUs online.
     {
         let resume_quiet_until = resume_quiet_until.clone();
+        let apply_lock_for_sleep = apply_lock.clone();
+        let apply_generation_for_sleep = apply_generation.clone();
+        let core_preset_for_sleep = core_preset.clone();
+        let last_applied_for_sleep = last_applied_at.clone();
+        let suspend_pending_for_sleep = suspend_pending.clone();
         tokio::spawn(async move {
             let system_conn = match connection::Builder::system() {
                 Ok(builder) => match builder.build().await {
@@ -415,20 +492,134 @@ async fn main() -> zbus::Result<()> {
                 }
             };
             let Ok(login1) = Login1ManagerProxy::new(&system_conn).await else {
-                eprintln!("[strixctld] logind proxy unavailable, resume guard disabled");
+                eprintln!("[strixctld] logind proxy unavailable; suspend CPU safety disabled");
                 return;
+            };
+            let mut inhibitor = match login1.inhibit(
+                "sleep",
+                "strixctld",
+                "bring all CPUs online before s2idle",
+                "delay",
+            ).await {
+                Ok(fd) => Some(fd),
+                Err(e) => {
+                    eprintln!("[strixctld] CRITICAL: cannot acquire logind sleep delay inhibitor; suspend CPU safety disabled: {e}");
+                    return;
+                }
             };
             let Ok(mut sleep_signals) = login1.receive_prepare_for_sleep().await else {
-                eprintln!("[strixctld] logind PrepareForSleep subscribe failed, resume guard disabled");
+                eprintln!("[strixctld] logind PrepareForSleep subscribe failed; suspend CPU safety disabled");
                 return;
             };
-            while let Some(signal) = sleep_signals.next().await {
-                let Ok(args) = signal.args() else { continue };
-                if !args.start {
+            // Close the startup/reconnect race between acquiring the inhibitor
+            // and subscribing: if logind is already preparing, synthesize the
+            // true edge instead of waiting for a signal that already fired.
+            let mut pending_start = match login1.preparing_for_sleep().await {
+                Ok(preparing) => preparing,
+                Err(e) => {
+                    eprintln!("[strixctld] cannot query logind PreparingForSleep; suspend CPU safety disabled: {e}");
+                    return;
+                }
+            };
+            // The guard is intentionally retained from PrepareForSleep(true)
+            // until the matching false signal. That serializes daemon-owned
+            // profile/core changes across the complete sleep cycle.
+            let mut sleep_guard: Option<OwnedMutexGuard<()>> = None;
+            let mut restore_snapshot: Option<(u32, Option<bool>, u64)> = None;
+            loop {
+                let start = if pending_start {
+                    pending_start = false;
+                    true
+                } else {
+                    let Some(signal) = sleep_signals.next().await else { break };
+                    let Ok(args) = signal.args() else {
+                        eprintln!("[strixctld] malformed PrepareForSleep signal ignored");
+                        continue;
+                    };
+                    args.start
+                };
+                if start {
+                    if suspend_pending_for_sleep.swap(true, Ordering::SeqCst) {
+                        eprintln!("[strixctld] duplicate PrepareForSleep(true) ignored");
+                        continue;
+                    }
+                    if inhibitor.is_none() {
+                        eprintln!("[strixctld] CRITICAL: PrepareForSleep(true) received without a delay inhibitor");
+                    }
+
+                    let guard = apply_lock_for_sleep.clone().lock_owned().await;
+                    let preset = *core_preset_for_sleep.lock().unwrap();
+                    let smt_enabled = backend::read_smt();
+                    let generation = apply_generation_for_sleep.load(Ordering::SeqCst);
+                    restore_snapshot = Some((preset, smt_enabled, generation));
+
+                    eprintln!("[strixctld] suspend requested; bringing every present CPU online");
+                    let online_result = tokio::task::spawn_blocking(backend::online_all_cpus).await;
+                    match online_result {
+                        Ok(Ok(())) => eprintln!("[strixctld] pre-suspend CPU online verification succeeded"),
+                        Ok(Err(e)) => eprintln!("[strixctld] CRITICAL: pre-suspend CPU online verification failed; suspend will proceed after releasing the delay inhibitor: {e}"),
+                        Err(e) => eprintln!("[strixctld] CRITICAL: pre-suspend CPU online task failed; suspend will proceed after releasing the delay inhibitor: {e}"),
+                    }
+                    sleep_guard = Some(guard);
+                    // Closing the fd tells logind this delay inhibitor has
+                    // completed. It is reacquired after resume for the next cycle.
+                    drop(inhibitor.take());
+                } else if let Some(guard) = sleep_guard.take() {
                     eprintln!("[strixctld] resume from sleep detected; holding SMU guards for {}s", RESUME_QUIET_PERIOD.as_secs());
                     *resume_quiet_until.lock().unwrap() = Some(Instant::now() + RESUME_QUIET_PERIOD);
+                    suspend_pending_for_sleep.store(false, Ordering::SeqCst);
+                    drop(guard);
+
+                    if let Some((preset, smt_enabled, generation)) = restore_snapshot.take() {
+                        let lock = apply_lock_for_sleep.clone();
+                        let generation_counter = apply_generation_for_sleep.clone();
+                        let last_applied = last_applied_for_sleep.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(RESUME_QUIET_PERIOD).await;
+                            let _guard = lock.lock().await;
+                            if generation_counter.load(Ordering::SeqCst) != generation {
+                                eprintln!("[strixctld] resume restore skipped; a newer profile/core change superseded the pre-suspend selection");
+                                return;
+                            }
+                            let errors = if let Some(active_name) = profiles::load_active() {
+                                run_apply_saved_profile(&active_name).await
+                            } else {
+                                let mut errors = Vec::new();
+                                if let Some(enabled) = smt_enabled {
+                                    if let Err(e) = backend::set_smt(enabled) {
+                                        errors.push(format!("SMT: {e}"));
+                                    }
+                                }
+                                if let Err(e) = backend::set_core_preset(&CorePreset::from_u32(preset)) {
+                                    errors.push(format!("core preset: {e}"));
+                                }
+                                errors
+                            };
+                            if errors.is_empty() {
+                                generation_counter.fetch_add(1, Ordering::SeqCst);
+                                *last_applied.lock().unwrap() = Some(Instant::now());
+                                eprintln!("[strixctld] resume: restored pre-suspend profile/core selection");
+                            } else {
+                                eprintln!("[strixctld] resume restore errors: {}", errors.join(" | "));
+                            }
+                        });
+                    }
+
+                    inhibitor = match login1.inhibit(
+                        "sleep", "strixctld", "bring all CPUs online before s2idle", "delay",
+                    ).await {
+                        Ok(fd) => Some(fd),
+                        Err(e) => {
+                            eprintln!("[strixctld] CRITICAL: cannot reacquire logind sleep delay inhibitor; future suspend CPU safety disabled: {e}");
+                            None
+                        }
+                    };
+                } else {
+                    eprintln!("[strixctld] duplicate or unmatched PrepareForSleep(false) ignored");
                 }
             }
+            suspend_pending_for_sleep.store(false, Ordering::SeqCst);
+            eprintln!("[strixctld] logind PrepareForSleep stream ended; suspend CPU safety disabled");
         });
     }
 
@@ -499,6 +690,9 @@ async fn main() -> zbus::Result<()> {
     let current_saved_for_guard = current_saved_profile.clone();
     let last_applied_for_guard = last_applied_at.clone();
     let resume_quiet_for_guard = resume_quiet_until.clone();
+    let apply_lock_for_guard = apply_lock.clone();
+    let apply_generation_for_guard = apply_generation.clone();
+    let suspend_pending_for_guard = suspend_pending.clone();
     tokio::spawn(async move {
         // Offset the first tick by a full period. The read itself is SMU-safe, but a
         // drift re-apply runs asusctl/ryzenadj; deferring the first tick keeps any
@@ -554,9 +748,21 @@ async fn main() -> zbus::Result<()> {
                      re-applying saved profile '{saved_name}'"
                 );
                 *last_applied_for_guard.lock().unwrap() = Some(Instant::now());
+                let lock = apply_lock_for_guard.clone();
+                let generation = apply_generation_for_guard.clone();
+                let quiet = resume_quiet_for_guard.clone();
+                let suspending = suspend_pending_for_guard.clone();
                 tokio::spawn(async move {
+                    let _guard = lock.lock().await;
+                    let resume_quiet = quiet.lock().unwrap()
+                        .is_some_and(|deadline| Instant::now() < deadline);
+                    if suspending.load(Ordering::SeqCst) || resume_quiet {
+                        return;
+                    }
                     let errors = run_apply_saved_profile(&saved_name).await;
-                    if !errors.is_empty() {
+                    if errors.is_empty() {
+                        generation.fetch_add(1, Ordering::SeqCst);
+                    } else {
                         eprintln!(
                             "[strixctld] guard re-apply errors: {}",
                             errors.join(" | ")
@@ -581,6 +787,9 @@ async fn main() -> zbus::Result<()> {
     let current_saved_for_ppt = current_saved_profile.clone();
     let last_applied_for_ppt = last_applied_at.clone();
     let resume_quiet_for_ppt = resume_quiet_until.clone();
+    let apply_lock_for_ppt = apply_lock.clone();
+    let apply_generation_for_ppt = apply_generation.clone();
+    let suspend_pending_for_ppt = suspend_pending.clone();
     tokio::spawn(async move {
         // Offset the first tick by a full period. `tokio::time::interval` fires its
         // first tick immediately, which would poke the SMU via `ryzenadj --info` at
@@ -618,9 +827,21 @@ async fn main() -> zbus::Result<()> {
                      re-applying saved profile '{saved_name}'"
                 );
                 *last_applied_for_ppt.lock().unwrap() = Some(Instant::now());
+                let lock = apply_lock_for_ppt.clone();
+                let generation = apply_generation_for_ppt.clone();
+                let quiet = resume_quiet_for_ppt.clone();
+                let suspending = suspend_pending_for_ppt.clone();
                 tokio::spawn(async move {
+                    let _guard = lock.lock().await;
+                    let resume_quiet = quiet.lock().unwrap()
+                        .is_some_and(|deadline| Instant::now() < deadline);
+                    if suspending.load(Ordering::SeqCst) || resume_quiet {
+                        return;
+                    }
                     let errors = run_apply_saved_profile(&saved_name).await;
-                    if !errors.is_empty() {
+                    if errors.is_empty() {
+                        generation.fetch_add(1, Ordering::SeqCst);
+                    } else {
                         eprintln!(
                             "[strixctld] guard re-apply errors: {}",
                             errors.join(" | ")
@@ -636,6 +857,7 @@ async fn main() -> zbus::Result<()> {
     // This is a fallback for cases where the gdbus notification from the GUI
     // was not received (e.g. daemon was not yet running).
     let conn_clone3 = conn.clone();
+    let apply_generation_for_active = apply_generation.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -651,6 +873,7 @@ async fn main() -> zbus::Result<()> {
                 }
             };
             if changed {
+                apply_generation_for_active.fetch_add(1, Ordering::SeqCst);
                 if let Ok(iref) = conn_clone3
                     .object_server()
                     .interface::<_, StrixCtlService>("/com/strixctl/Service")
@@ -668,4 +891,3 @@ async fn main() -> zbus::Result<()> {
     std::future::pending::<()>().await;
     unreachable!()
 }
-

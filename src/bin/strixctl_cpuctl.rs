@@ -8,6 +8,7 @@
 //!   strixctl-cpuctl cores   <4|8|12|16>
 //!   strixctl-cpuctl smt     <0|1>
 //!   strixctl-cpuctl maxfreq <kHz|max>
+//!   strixctl-cpuctl online-all now
 //!
 //! SMT is controlled globally via /sys/devices/system/cpu/smt/control (on|off).
 //! When SMT is off, sibling threads (cpu16-31) are absent from sysfs, so
@@ -46,6 +47,7 @@ fn main() {
         eprintln!("       strixctl-cpuctl cores   <4|8|12|16>");
         eprintln!("       strixctl-cpuctl smt     <0|1>");
         eprintln!("       strixctl-cpuctl maxfreq <kHz|max>");
+        eprintln!("       strixctl-cpuctl online-all now");
         process::exit(1);
     }
 
@@ -54,6 +56,7 @@ fn main() {
         "cores"   => cmd_cores(&args[2]),
         "smt"     => cmd_smt(&args[2]),
         "maxfreq" => cmd_maxfreq(&args[2]),
+        "online-all" => cmd_online_all(&args[2]),
         other     => Err(format!("unknown command '{other}'")),
     };
 
@@ -61,6 +64,91 @@ fn main() {
         eprintln!("strixctl-cpuctl: {e}");
         process::exit(1);
     }
+}
+
+/// Brings every CPU reported by the kernel's `present` mask online. This is
+/// deliberately independent of the machine-specific core preset topology:
+/// CPUs must not remain offline when firmware enters s2idle.
+#[cfg(unix)]
+fn cmd_online_all(value: &str) -> Result<(), String> {
+    if value != "now" {
+        return Err(format!("online-all: expected 'now', got '{value}'"));
+    }
+
+    // With SMT administratively off, its sibling CPUs remain in `present` but
+    // reject online writes. Temporarily enable SMT so the final present/online
+    // equality is meaningful; the daemon restores the active profile on resume.
+    if let Ok(control) = fs::read_to_string("/sys/devices/system/cpu/smt/control") {
+        if control.trim().eq_ignore_ascii_case("off") {
+            write_sysfs("/sys/devices/system/cpu/smt/control", "on")
+                .map_err(|e| format!("online-all: enable SMT: {e}"))?;
+        }
+    }
+
+    let present_raw = fs::read_to_string("/sys/devices/system/cpu/present")
+        .map_err(|e| format!("online-all: cannot read present CPUs: {e}"))?;
+    let present = parse_cpu_list(&present_raw)?;
+    if present.is_empty() {
+        return Err("online-all: kernel reported no present CPUs".into());
+    }
+
+    let mut write_errors = Vec::new();
+    for cpu in present.iter().copied().filter(|cpu| *cpu != 0) {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/online");
+        if !std::path::Path::new(&path).exists() {
+            write_errors.push(format!("cpu{cpu}: missing {path}"));
+        } else if let Err(e) = write_sysfs(&path, "1") {
+            write_errors.push(format!("cpu{cpu}: {e}"));
+        }
+    }
+
+    let online_raw = fs::read_to_string("/sys/devices/system/cpu/online")
+        .map_err(|e| format!("online-all: cannot verify online CPUs: {e}"))?;
+    let online = parse_cpu_list(&online_raw)?;
+    let missing: Vec<u32> = present.difference(&online).copied().collect();
+    if missing.is_empty() {
+        if !write_errors.is_empty() {
+            eprintln!(
+                "strixctl-cpuctl: online-all verified despite transient write errors: {}",
+                write_errors.join("; ")
+            );
+        }
+        Ok(())
+    } else {
+        let mut details = Vec::new();
+        if !missing.is_empty() {
+            details.push(format!("still offline: {}", format_cpu_list(&missing)));
+        }
+        if !write_errors.is_empty() {
+            details.push(format!("write failures: {}", write_errors.join("; ")));
+        }
+        Err(format!("online-all: {}", details.join("; ")))
+    }
+}
+
+#[cfg(unix)]
+fn parse_cpu_list(raw: &str) -> Result<std::collections::BTreeSet<u32>, String> {
+    let mut cpus = std::collections::BTreeSet::new();
+    for part in raw.trim().split(',').filter(|part| !part.is_empty()) {
+        let (start, end) = match part.split_once('-') {
+            Some((start, end)) => (start, end),
+            None => (part, part),
+        };
+        let start: u32 = start.parse()
+            .map_err(|_| format!("invalid CPU list '{raw}'"))?;
+        let end: u32 = end.parse()
+            .map_err(|_| format!("invalid CPU list '{raw}'"))?;
+        if start > end {
+            return Err(format!("invalid CPU range '{part}'"));
+        }
+        cpus.extend(start..=end);
+    }
+    Ok(cpus)
+}
+
+#[cfg(unix)]
+fn format_cpu_list(cpus: &[u32]) -> String {
+    cpus.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
 }
 
 #[cfg(unix)]
@@ -250,4 +338,20 @@ fn write_scaling_max_freq(khz: u32) -> Result<(), String> {
 #[cfg(unix)]
 fn write_sysfs(path: &str, value: &str) -> Result<(), String> {
     fs::write(path, value).map_err(|e| format!("write {path}: {e}"))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::parse_cpu_list;
+
+    #[test]
+    fn parses_kernel_cpu_lists() {
+        let parsed = parse_cpu_list("0-3,8,10-11\n").unwrap();
+        assert_eq!(parsed.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 8, 10, 11]);
+    }
+
+    #[test]
+    fn rejects_reversed_cpu_ranges() {
+        assert!(parse_cpu_list("4-2").is_err());
+    }
 }

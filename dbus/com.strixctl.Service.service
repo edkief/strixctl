@@ -1,3 +1,4 @@
 [D-BUS Service]
 Name=com.strixctl.Service
 Exec=/usr/local/bin/strixctld
+SystemdService=strixctld.service

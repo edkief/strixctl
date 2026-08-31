@@ -88,7 +88,7 @@ Do not add unconditional `ryzenadj --info` reads. On Linux `platform::AUTO_READ_
 Order in `apply_full_profile` ([src/app.rs](src/app.rs), the `cfg(not(windows))` one):
 platform profile → fan curve → **sleep 800 ms** → PPT → boost → SMT → core preset → frequency cap.
 
-`run_apply_saved_profile` ([src/bin/strixctld.rs](src/bin/strixctld.rs)) duplicates this **minus the SMT step** — a D-Bus/GNOME apply leaves SMT untouched where a GUI apply sets it. Known divergence; keep the rest in sync and decide deliberately if you touch either.
+`run_apply_saved_profile` ([src/bin/strixctld.rs](src/bin/strixctld.rs)) duplicates this ordering, including SMT before the core preset. The daemon's pre-suspend handler may temporarily enable SMT to bring every present CPU online, so resume restoration must restore the saved SMT choice as part of the active profile.
 
 A `None` frequency cap means "leave the cap alone", not "remove it": profiles written before the field existed deserialize to `None` and must not silently uncap the machine.
 
